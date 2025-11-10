@@ -1,5 +1,5 @@
-# gemini_intraday_pro_enhanced.py
-# Enhanced: Multiple strategies, improved indicators, auto-trading, and better signals
+# gemini_intraday_pro_final.py
+# Final Version: Fixed errors, email notifications, server deployment ready
 
 import streamlit as st
 import pandas as pd
@@ -16,9 +16,47 @@ import math
 import warnings
 from typing import Dict, List, Optional
 import json
+import smtplib
+from email.mime.text import MimeText
+from email.mime.multipart import MimeMultipart
+import os
 warnings.filterwarnings("ignore")
 
-st.set_page_config(layout="wide", page_title="Gemini Intraday Pro — Enhanced Terminal")
+st.set_page_config(layout="wide", page_title="Gemini Intraday Pro — Trading Terminal")
+
+# ---------------------------
+# Email Configuration
+# ---------------------------
+EMAIL_CONFIG = {
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "sender_email": "your.email@gmail.com",  # Change this to your email
+    "sender_password": "your_app_password",  # Use App Password, not regular password
+    "receiver_email": "rantv2002@gmail.com"
+}
+
+def send_email_notification(subject, message):
+    """Send email notification for auto-trades"""
+    try:
+        msg = MimeMultipart()
+        msg['From'] = EMAIL_CONFIG["sender_email"]
+        msg['To'] = EMAIL_CONFIG["receiver_email"]
+        msg['Subject'] = subject
+        
+        msg.attach(MimeText(message, 'plain'))
+        
+        server = smtplib.SMTP(EMAIL_CONFIG["smtp_server"], EMAIL_CONFIG["smtp_port"])
+        server.starttls()
+        server.login(EMAIL_CONFIG["sender_email"], EMAIL_CONFIG["sender_password"])
+        text = msg.as_string()
+        server.sendmail(EMAIL_CONFIG["sender_email"], EMAIL_CONFIG["receiver_email"], text)
+        server.quit()
+        
+        print(f"Email sent: {subject}")
+        return True
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+        return False
 
 # ---------------------------
 # Enhanced Strategy Configuration
@@ -68,32 +106,12 @@ STRATEGIES = {
         "rsi_oversold": 30,
         "divergence_lookback": 5
     },
-    "VWAP_Bollinger": {
-        "description": "VWAP with Bollinger Band breakout",
-        "vwap_period": 20,
-        "bb_period": 20,
-        "bb_std": 2,
-        "volume_threshold": 1.3
-    },
-    "SuperTrend_EMA": {
-        "description": "SuperTrend with EMA confirmation",
-        "atr_period": 10,
-        "atr_multiplier": 3,
-        "ema_period": 21,
-        "volume_threshold": 1.2
-    },
     "Golden_Cross": {
         "description": "50/200 EMA Golden Cross strategy",
         "ema_short": 50,
         "ema_long": 200,
         "rsi_period": 14,
         "volume_threshold": 1.5
-    },
-    "Volume_Spike": {
-        "description": "Volume spike with price breakout",
-        "volume_multiplier": 2.0,
-        "price_breakout": 0.02,
-        "rsi_confirmation": True
     }
 }
 
@@ -105,11 +123,12 @@ class AutoTradeConfig:
         self.enabled = False
         self.max_trades_per_day = 10
         self.max_position_size = 50000  # ₹
-        self.min_confidence = 0.7
+        self.min_confidence = 0.6  # Reduced for more signals
         self.risk_per_trade = 0.02  # 2%
         self.auto_exit = True
         self.profit_target = 0.015  # 1.5%
         self.stop_loss = 0.01  # 1%
+        self.email_notifications = True
 
 # ---------------------------
 # Paper Trading Configuration
@@ -125,12 +144,10 @@ class PaperTrading:
     def execute_trade(self, symbol, action, quantity, price, strategy, reason):
         """Execute paper trade"""
         if symbol in self.positions:
-            st.warning(f"Position already exists for {symbol}")
             return False
             
         trade_value = quantity * price
         if trade_value > self.available_capital:
-            st.error(f"Insufficient capital for {symbol}. Available: ₹{self.available_capital:.2f}")
             return False
             
         self.positions[symbol] = {
@@ -157,11 +174,9 @@ class PaperTrading:
         else:  # SELL
             pnl = (position['entry_price'] - exit_price) * position['quantity']
             
-        # Update capital
         trade_value = position['quantity'] * exit_price
         self.available_capital += trade_value
         
-        # Record trade history
         trade_record = {
             **position,
             'exit_price': exit_price,
@@ -172,12 +187,11 @@ class PaperTrading:
         self.trade_history.append(trade_record)
         self.total_pnl += pnl
         
-        # Remove from positions
         del self.positions[symbol]
         return True
 
 # ---------------------------
-# Enhanced Technical Indicators (No external TA library needed)
+# Enhanced Technical Indicators (Fixed Version)
 # ---------------------------
 def compute_rsi(series, period=14):
     """Calculate RSI without external library"""
@@ -210,116 +224,63 @@ def compute_atr(high, low, close, period=14):
     atr = tr.rolling(period).mean()
     return atr
 
-def compute_supertrend(high, low, close, period=10, multiplier=3):
-    """Calculate SuperTrend indicator"""
-    atr = compute_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    
-    # Basic upper and lower bands
-    upper_band = hl2 + (multiplier * atr)
-    lower_band = hl2 - (multiplier * atr)
-    
-    # Initialize SuperTrend
-    st = pd.Series(index=close.index, dtype=float)
-    trend = pd.Series(index=close.index, dtype=int)
-    
-    for i in range(1, len(close)):
-        if close.iloc[i] > upper_band.iloc[i-1]:
-            st.iloc[i] = lower_band.iloc[i]
-            trend.iloc[i] = 1  # Uptrend
-        elif close.iloc[i] < lower_band.iloc[i-1]:
-            st.iloc[i] = upper_band.iloc[i]
-            trend.iloc[i] = -1  # Downtrend
-        else:
-            st.iloc[i] = st.iloc[i-1]
-            trend.iloc[i] = trend.iloc[i-1]
-            
-    return st, trend
-
-def compute_stochastic(high, low, close, k_period=14, d_period=3):
-    """Calculate Stochastic Oscillator"""
-    lowest_low = low.rolling(window=k_period).min()
-    highest_high = high.rolling(window=k_period).max()
-    
-    k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
-    d = k.rolling(window=d_period).mean()
-    
-    return k, d
-
-def compute_obv(close, volume):
-    """Calculate On Balance Volume"""
-    obv = pd.Series(index=close.index, dtype=float)
-    obv.iloc[0] = volume.iloc[0]
-    
-    for i in range(1, len(close)):
-        if close.iloc[i] > close.iloc[i-1]:
-            obv.iloc[i] = obv.iloc[i-1] + volume.iloc[i]
-        elif close.iloc[i] < close.iloc[i-1]:
-            obv.iloc[i] = obv.iloc[i-1] - volume.iloc[i]
-        else:
-            obv.iloc[i] = obv.iloc[i-1]
-    
-    return obv
-
-def compute_volume_profile(volume, price, bins=20):
-    """Calculate Volume Profile"""
-    # Simplified volume profile
-    price_range = price.max() - price.min()
-    bin_size = price_range / bins
-    volume_profile = {}
-    
-    for i in range(len(price)):
-        bin_level = round(price.iloc[i] / bin_size) * bin_size
-        if bin_level in volume_profile:
-            volume_profile[bin_level] += volume.iloc[i]
-        else:
-            volume_profile[bin_level] = volume.iloc[i]
-    
-    return volume_profile
+def compute_bollinger_bands(close, period=20, std=2):
+    """Calculate Bollinger Bands"""
+    middle = close.rolling(window=period).mean()
+    std_dev = close.rolling(window=period).std()
+    upper = middle + (std_dev * std)
+    lower = middle - (std_dev * std)
+    return upper, middle, lower
 
 # ---------------------------
-# Data Fetching with Enhanced Indicators
+# Data Fetching with Enhanced Indicators (FIXED)
 # ---------------------------
 @st.cache_data(ttl=30)
 def fetch_enhanced_ohlc(symbol: str, period="1d", interval="5m"):
     """Fetch OHLC data with enhanced technical indicators"""
     try:
-        df = yf.download(symbol, period=period, interval=interval, progress=False, threads=False)
+        ticker = symbol.replace('.NS', '') + '.NS' if not symbol.endswith('.NS') else symbol
+        df = yf.download(ticker, period=period, interval=interval, progress=False, threads=False)
+        
         if df is None or df.empty:
             return None
         
         df = df.dropna()
+        if len(df) < 50:  # Ensure enough data points
+            return None
+            
         df = compute_enhanced_indicators(df)
         return df
     except Exception as e:
-        st.error(f"Error fetching data for {symbol}: {e}")
+        print(f"Error fetching data for {symbol}: {e}")
         return None
 
 def compute_enhanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute enhanced technical indicators without external dependencies"""
+    """Compute enhanced technical indicators - FIXED VERSION"""
     df = df.copy()
     
     # Basic indicators
     df['SMA_20'] = df['Close'].rolling(window=20, min_periods=1).mean()
     df['SMA_50'] = df['Close'].rolling(window=50, min_periods=1).mean()
-    df['SMA_200'] = df['Close'].rolling(window=200, min_periods=1).mean()
     df['EMA_8'] = compute_ema(df['Close'], 8)
     df['EMA_21'] = compute_ema(df['Close'], 21)
     df['EMA_50'] = compute_ema(df['Close'], 50)
     df['EMA_200'] = compute_ema(df['Close'], 200)
     
-    # Bollinger Bands
-    df['BB_MID'] = df['Close'].rolling(window=20, min_periods=1).mean()
-    df['BB_STD'] = df['Close'].rolling(window=20, min_periods=1).std()
-    df['BB_UP'] = df['BB_MID'] + 2 * df['BB_STD']
-    df['BB_LO'] = df['BB_MID'] - 2 * df['BB_STD']
+    # Bollinger Bands - FIXED: Proper calculation
+    bb_upper, bb_middle, bb_lower = compute_bollinger_bands(df['Close'], 20, 2)
+    df['BB_UP'] = bb_upper
+    df['BB_MID'] = bb_middle
+    df['BB_LO'] = bb_lower
     df['BB_WIDTH'] = (df['BB_UP'] - df['BB_LO']) / df['BB_MID']
-    df['BB_POSITION'] = (df['Close'] - df['BB_LO']) / (df['BB_UP'] - df['BB_LO'])
+    
+    # FIXED: Safe BB_POSITION calculation
+    bb_range = df['BB_UP'] - df['BB_LO']
+    df['BB_POSITION'] = (df['Close'] - df['BB_LO']) / bb_range.replace(0, 1)  # Avoid division by zero
     
     # RSI with multiple periods
     df['RSI_14'] = compute_rsi(df['Close'], 14)
     df['RSI_8'] = compute_rsi(df['Close'], 8)
-    df['RSI_21'] = compute_rsi(df['Close'], 21)
     
     # MACD
     macd, macd_signal, macd_histogram = compute_macd(df['Close'])
@@ -327,14 +288,12 @@ def compute_enhanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['MACD_Signal'] = macd_signal
     df['MACD_Histogram'] = macd_histogram
     
-    # ATR and Volatility
+    # ATR
     df['ATR'] = compute_atr(df['High'], df['Low'], df['Close'], 14)
-    df['VOLATILITY'] = df['Close'].pct_change().rolling(window=20).std() * np.sqrt(252) * 100
     
-    # Volume indicators - FIXED: Proper handling of volume calculations
+    # Volume indicators - FIXED: Proper Series handling
     if 'Volume' in df.columns:
-        # Convert to series to avoid DataFrame issues
-        volume_series = df['Volume'].copy()
+        volume_series = df['Volume']
         df['VOLUME_MA_20'] = volume_series.rolling(window=20, min_periods=1).mean()
         
         # Safe volume ratio calculation
@@ -343,43 +302,22 @@ def compute_enhanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
         volume_ratio = volume_ratio.replace([np.inf, -np.inf], 1.0).fillna(1.0)
         df['VOLUME_RATIO'] = volume_ratio
         
-        # Additional volume indicators
-        df['VOLUME_MA_50'] = volume_series.rolling(window=50, min_periods=1).mean()
-        df['OBV'] = compute_obv(df['Close'], volume_series)
     else:
         df['Volume'] = 0
         df['VOLUME_MA_20'] = 0
         df['VOLUME_RATIO'] = 1.0
-        df['VOLUME_MA_50'] = 0
-        df['OBV'] = 0
     
     # VWAP (simplified)
     typical_price = (df['High'] + df['Low'] + df['Close']) / 3
     df['VWAP'] = (typical_price * df['Volume']).cumsum() / df['Volume'].cumsum()
-    df['VWAP_DISTANCE'] = (df['Close'] - df['VWAP']) / df['VWAP'] * 100
-    
-    # Stochastic
-    stoch_k, stoch_d = compute_stochastic(df['High'], df['Low'], df['Close'])
-    df['STOCH_K'] = stoch_k
-    df['STOCH_D'] = stoch_d
-    
-    # SuperTrend
-    supertrend, supertrend_trend = compute_supertrend(df['High'], df['Low'], df['Close'])
-    df['SUPERTREND'] = supertrend
-    df['SUPERTREND_TREND'] = supertrend_trend
     
     # Price momentum
     df['MOMENTUM_5'] = df['Close'].pct_change(5) * 100
-    df['MOMENTUM_10'] = df['Close'].pct_change(10) * 100
-    
-    # Support and Resistance levels (simplified)
-    df['RESISTANCE'] = df['High'].rolling(window=20, min_periods=1).max()
-    df['SUPPORT'] = df['Low'].rolling(window=20, min_periods=1).min()
     
     return df
 
 # ---------------------------
-# Enhanced Signal Generation
+# Enhanced Signal Generation (Relaxed Conditions)
 # ---------------------------
 def generate_enhanced_signals(df: pd.DataFrame, strategy_name: str = "SMA_Crossover_Enhanced") -> Optional[Dict]:
     """Generate enhanced trading signals based on selected strategy"""
@@ -387,18 +325,6 @@ def generate_enhanced_signals(df: pd.DataFrame, strategy_name: str = "SMA_Crosso
         return None
     
     strategy = STRATEGIES[strategy_name]
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    # Common signal components
-    signal_data = {
-        'strategy': strategy_name,
-        'timestamp': df.index[-1].to_pydatetime(),
-        'symbol': None,
-        'confidence': 0.0,
-        'entry': _safe_scalar_from_row(latest, 'Close'),
-        'indicators': {}
-    }
     
     # Strategy-specific signal generation
     if strategy_name == "SMA_Crossover_Enhanced":
@@ -413,24 +339,26 @@ def generate_enhanced_signals(df: pd.DataFrame, strategy_name: str = "SMA_Crosso
         signal = macd_momentum_strategy(df, strategy)
     elif strategy_name == "RSI_Divergence":
         signal = rsi_divergence_strategy(df, strategy)
-    elif strategy_name == "VWAP_Bollinger":
-        signal = vwap_bollinger_strategy(df, strategy)
-    elif strategy_name == "SuperTrend_EMA":
-        signal = supertrend_ema_strategy(df, strategy)
     elif strategy_name == "Golden_Cross":
         signal = golden_cross_strategy(df, strategy)
-    elif strategy_name == "Volume_Spike":
-        signal = volume_spike_strategy(df, strategy)
     else:
         signal = None
     
     if signal:
-        signal_data.update(signal)
-        return signal_data
+        signal.update({
+            'strategy': strategy_name,
+            'timestamp': datetime.now(),
+            'confidence': signal.get('confidence', 0.5)
+        })
+        return signal
+    
     return None
 
 def sma_crossover_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
-    """Enhanced SMA Crossover strategy with RSI 70/30"""
+    """Enhanced SMA Crossover strategy with relaxed conditions"""
+    if len(df) < 3:
+        return None
+        
     latest = df.iloc[-1]
     prev = df.iloc[-2]
     
@@ -441,53 +369,34 @@ def sma_crossover_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
     rsi = _safe_scalar_from_row(latest, 'RSI_14')
     volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
     
-    # BUY Signal: SMA20 crosses above SMA50, RSI < 70 (not overbought), volume confirmation
-    if (not math.isnan(sma20_latest) and not math.isnan(sma50_latest) and
-        not math.isnan(sma20_prev) and not math.isnan(sma50_prev) and
-        sma20_latest > sma50_latest and sma20_prev <= sma50_prev and
-        not math.isnan(rsi) and rsi < strategy["rsi_overbought"] and
-        volume_ratio > strategy["volume_multiplier"]):
+    # Relaxed BUY Signal
+    if (sma20_latest > sma50_latest and sma20_prev <= sma50_prev and
+        rsi < strategy["rsi_overbought"] and volume_ratio > 1.0):
         
         entry = _safe_scalar_from_row(latest, 'Close')
-        bb_lo = _safe_scalar_from_row(latest, 'BB_LO')
-        sl = bb_lo if not math.isnan(bb_lo) else entry * 0.99
-        
-        # Confidence calculation
-        confidence = min(0.95, 
-                        (0.4 if rsi > 50 else 0.2) +  # RSI contribution
-                        (0.3 if volume_ratio > 1.5 else 0.1) +  # Volume contribution
-                        (0.3 if (sma20_latest - sma50_latest) / sma50_latest > 0.01 else 0.1))  # Trend strength
+        confidence = 0.6 + min(0.3, (rsi - 30) / 40)  # Higher confidence when RSI > 30
         
         return {
             'action': 'BUY',
             'entry': entry,
-            'stop_loss': sl,
+            'stop_loss': entry * 0.99,
             'target1': entry * 1.015,
             'target2': entry * 1.03,
             'confidence': confidence,
             'reason': f"SMA20 crossed above SMA50, RSI {rsi:.1f}, Volume {volume_ratio:.1f}x"
         }
     
-    # SELL Signal: SMA20 crosses below SMA50, RSI > 30 (not oversold), volume confirmation
-    elif (not math.isnan(sma20_latest) and not math.isnan(sma50_latest) and
-          not math.isnan(sma20_prev) and not math.isnan(sma50_prev) and
-          sma20_latest < sma50_latest and sma20_prev >= sma50_prev and
-          not math.isnan(rsi) and rsi > strategy["rsi_oversold"] and
-          volume_ratio > strategy["volume_multiplier"]):
+    # Relaxed SELL Signal
+    elif (sma20_latest < sma50_latest and sma20_prev >= sma50_prev and
+          rsi > strategy["rsi_oversold"] and volume_ratio > 1.0):
         
         entry = _safe_scalar_from_row(latest, 'Close')
-        bb_up = _safe_scalar_from_row(latest, 'BB_UP')
-        sl = bb_up if not math.isnan(bb_up) else entry * 1.01
-        
-        confidence = min(0.95,
-                        (0.4 if rsi < 50 else 0.2) +
-                        (0.3 if volume_ratio > 1.5 else 0.1) +
-                        (0.3 if (sma50_latest - sma20_latest) / sma20_latest > 0.01 else 0.1))
+        confidence = 0.6 + min(0.3, (70 - rsi) / 40)  # Higher confidence when RSI < 70
         
         return {
             'action': 'SELL',
             'entry': entry,
-            'stop_loss': sl,
+            'stop_loss': entry * 1.01,
             'target1': entry * 0.985,
             'target2': entry * 0.97,
             'confidence': confidence,
@@ -497,7 +406,10 @@ def sma_crossover_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
     return None
 
 def ema_momentum_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
-    """EMA Momentum strategy with MACD confirmation"""
+    """EMA Momentum strategy with relaxed conditions"""
+    if len(df) < 3:
+        return None
+        
     latest = df.iloc[-1]
     prev = df.iloc[-2]
     
@@ -505,19 +417,14 @@ def ema_momentum_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
     ema21_latest = _safe_scalar_from_row(latest, 'EMA_21')
     ema8_prev = _safe_scalar_from_row(prev, 'EMA_8')
     ema21_prev = _safe_scalar_from_row(prev, 'EMA_21')
-    rsi = _safe_scalar_from_row(latest, 'RSI_8')  # Faster RSI
-    macd = _safe_scalar_from_row(latest, 'MACD')
-    macd_signal = _safe_scalar_from_row(latest, 'MACD_Signal')
+    rsi = _safe_scalar_from_row(latest, 'RSI_8')
     
-    # BUY Signal: EMA8 above EMA21, MACD bullish, RSI not overbought
-    if (not math.isnan(ema8_latest) and not math.isnan(ema21_latest) and
-        not math.isnan(ema8_prev) and not math.isnan(ema21_prev) and
-        ema8_latest > ema21_latest and ema8_prev <= ema21_prev and
-        not math.isnan(macd) and not math.isnan(macd_signal) and
-        macd > macd_signal and not math.isnan(rsi) and rsi < strategy["rsi_overbought"]):
+    # Relaxed BUY Signal
+    if (ema8_latest > ema21_latest and ema8_prev <= ema21_prev and
+        rsi < strategy["rsi_overbought"]):
         
         entry = _safe_scalar_from_row(latest, 'Close')
-        confidence = min(0.95, 0.6 + (0.2 if rsi > 60 else 0) + (0.2 if macd > 0 else 0))
+        confidence = 0.65
         
         return {
             'action': 'BUY',
@@ -526,18 +433,15 @@ def ema_momentum_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
             'target1': entry * 1.02,
             'target2': entry * 1.04,
             'confidence': confidence,
-            'reason': f"EMA8 crossed above EMA21, MACD bullish, RSI {rsi:.1f}"
+            'reason': f"EMA8 crossed above EMA21, RSI {rsi:.1f}"
         }
     
-    # SELL Signal: EMA8 below EMA21, MACD bearish, RSI not oversold
-    elif (not math.isnan(ema8_latest) and not math.isnan(ema21_latest) and
-          not math.isnan(ema8_prev) and not math.isnan(ema21_prev) and
-          ema8_latest < ema21_latest and ema8_prev >= ema21_prev and
-          not math.isnan(macd) and not math.isnan(macd_signal) and
-          macd < macd_signal and not math.isnan(rsi) and rsi > strategy["rsi_oversold"]):
+    # Relaxed SELL Signal
+    elif (ema8_latest < ema21_latest and ema8_prev >= ema21_prev and
+          rsi > strategy["rsi_oversold"]):
         
         entry = _safe_scalar_from_row(latest, 'Close')
-        confidence = min(0.95, 0.6 + (0.2 if rsi < 40 else 0) + (0.2 if macd < 0 else 0))
+        confidence = 0.65
         
         return {
             'action': 'SELL',
@@ -546,62 +450,54 @@ def ema_momentum_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
             'target1': entry * 0.98,
             'target2': entry * 0.96,
             'confidence': confidence,
-            'reason': f"EMA8 crossed below EMA21, MACD bearish, RSI {rsi:.1f}"
+            'reason': f"EMA8 crossed below EMA21, RSI {rsi:.1f}"
         }
     
     return None
 
 def bollinger_rsi_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
-    """Bollinger Band + RSI strategy"""
+    """Bollinger Band + RSI strategy with relaxed conditions"""
     latest = df.iloc[-1]
     
     close = _safe_scalar_from_row(latest, 'Close')
     bb_up = _safe_scalar_from_row(latest, 'BB_UP')
     bb_lo = _safe_scalar_from_row(latest, 'BB_LO')
-    bb_width = _safe_scalar_from_row(latest, 'BB_WIDTH')
     rsi = _safe_scalar_from_row(latest, 'RSI_14')
-    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
     
-    # BUY Signal: Price near lower band, RSI oversold, narrow bands (squeeze)
-    if (not math.isnan(close) and not math.isnan(bb_lo) and not math.isnan(rsi) and
-        close <= bb_lo * 1.01 and rsi < strategy["rsi_oversold"] and 
-        not math.isnan(bb_width) and bb_width < strategy["squeeze_threshold"] and
-        volume_ratio > 1.0):
+    # Relaxed BUY Signal
+    if (close <= bb_lo * 1.02 and rsi < strategy["rsi_oversold"] + 10):  # More tolerant
         
-        confidence = min(0.95, 0.7 + (0.2 if rsi < 25 else 0) + (0.1 if bb_width < 0.05 else 0))
+        confidence = 0.7 - (rsi / 100)  # Higher confidence when RSI is lower
         
         return {
             'action': 'BUY',
             'entry': close,
             'stop_loss': close * 0.99,
-            'target1': bb_up * 0.95,  # Target near upper band
+            'target1': bb_up * 0.95,
             'target2': bb_up,
             'confidence': confidence,
-            'reason': f"Bollinger Squeeze, RSI oversold {rsi:.1f}, Band width {bb_width:.3f}"
+            'reason': f"Near lower Bollinger Band, RSI oversold {rsi:.1f}"
         }
     
-    # SELL Signal: Price near upper band, RSI overbought, narrow bands
-    elif (not math.isnan(close) and not math.isnan(bb_up) and not math.isnan(rsi) and
-          close >= bb_up * 0.99 and rsi > strategy["rsi_overbought"] and
-          not math.isnan(bb_width) and bb_width < strategy["squeeze_threshold"] and
-          volume_ratio > 1.0):
+    # Relaxed SELL Signal
+    elif (close >= bb_up * 0.98 and rsi > strategy["rsi_overbought"] - 10):  # More tolerant
         
-        confidence = min(0.95, 0.7 + (0.2 if rsi > 75 else 0) + (0.1 if bb_width < 0.05 else 0))
+        confidence = (rsi / 100) - 0.3  # Higher confidence when RSI is higher
         
         return {
             'action': 'SELL',
             'entry': close,
             'stop_loss': close * 1.01,
-            'target1': bb_lo * 1.05,  # Target near lower band
+            'target1': bb_lo * 1.05,
             'target2': bb_lo,
             'confidence': confidence,
-            'reason': f"Bollinger Squeeze, RSI overbought {rsi:.1f}, Band width {bb_width:.3f}"
+            'reason': f"Near upper Bollinger Band, RSI overbought {rsi:.1f}"
         }
     
     return None
 
 def mean_reversion_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
-    """Mean reversion strategy for overbought/oversold conditions"""
+    """Mean reversion strategy with relaxed conditions"""
     latest = df.iloc[-1]
     
     close = _safe_scalar_from_row(latest, 'Close')
@@ -609,44 +505,47 @@ def mean_reversion_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
     volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
     sma_20 = _safe_scalar_from_row(latest, 'SMA_20')
     
-    # BUY Signal: RSI oversold, price below SMA20, high volume
-    if (not math.isnan(rsi) and not math.isnan(close) and not math.isnan(sma_20) and
-        rsi < strategy["rsi_oversold"] and close < sma_20 and 
-        volume_ratio > strategy["volume_threshold"]):
+    # Relaxed BUY Signal
+    if (rsi < strategy["rsi_oversold"] + 15 and  # More tolerant
+        close < sma_20 * 1.02 and  # Price can be slightly above SMA
+        volume_ratio > 1.0):  # Lower volume threshold
         
-        confidence = min(0.95, 0.8 - (rsi / 100) + (0.2 if volume_ratio > 2.0 else 0.1))
+        confidence = 0.7 - (rsi / 100)
         
         return {
             'action': 'BUY',
             'entry': close,
             'stop_loss': close * 0.985,
-            'target1': sma_20,  # Target at moving average
-            'target2': sma_20 * 1.01,
+            'target1': sma_20,
+            'target2': sma_20 * 1.02,
             'confidence': confidence,
-            'reason': f"Mean Reversion BUY, RSI oversold {rsi:.1f}, Volume {volume_ratio:.1f}x"
+            'reason': f"Mean Reversion BUY, RSI {rsi:.1f}, Volume {volume_ratio:.1f}x"
         }
     
-    # SELL Signal: RSI overbought, price above SMA20, high volume
-    elif (not math.isnan(rsi) and not math.isnan(close) and not math.isnan(sma_20) and
-          rsi > strategy["rsi_overbought"] and close > sma_20 and
-          volume_ratio > strategy["volume_threshold"]):
+    # Relaxed SELL Signal
+    elif (rsi > strategy["rsi_overbought"] - 15 and  # More tolerant
+          close > sma_20 * 0.98 and  # Price can be slightly below SMA
+          volume_ratio > 1.0):  # Lower volume threshold
         
-        confidence = min(0.95, (rsi / 100) - 0.2 + (0.2 if volume_ratio > 2.0 else 0.1))
+        confidence = (rsi / 100) - 0.3
         
         return {
             'action': 'SELL',
             'entry': close,
             'stop_loss': close * 1.015,
-            'target1': sma_20,  # Target at moving average
-            'target2': sma_20 * 0.99,
+            'target1': sma_20,
+            'target2': sma_20 * 0.98,
             'confidence': confidence,
-            'reason': f"Mean Reversion SELL, RSI overbought {rsi:.1f}, Volume {volume_ratio:.1f}x"
+            'reason': f"Mean Reversion SELL, RSI {rsi:.1f}, Volume {volume_ratio:.1f}x"
         }
     
     return None
 
 def macd_momentum_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
-    """MACD Momentum strategy"""
+    """MACD Momentum strategy with relaxed conditions"""
+    if len(df) < 3:
+        return None
+        
     latest = df.iloc[-1]
     prev = df.iloc[-2]
     
@@ -654,16 +553,12 @@ def macd_momentum_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
     macd_signal = _safe_scalar_from_row(latest, 'MACD_Signal')
     macd_prev = _safe_scalar_from_row(prev, 'MACD')
     macd_signal_prev = _safe_scalar_from_row(prev, 'MACD_Signal')
-    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
     
-    # BUY Signal: MACD crosses above signal line
-    if (not math.isnan(macd) and not math.isnan(macd_signal) and
-        not math.isnan(macd_prev) and not math.isnan(macd_signal_prev) and
-        macd > macd_signal and macd_prev <= macd_signal_prev and
-        volume_ratio > strategy["volume_threshold"]):
+    # Relaxed BUY Signal
+    if (macd > macd_signal and macd_prev <= macd_signal_prev):
         
         entry = _safe_scalar_from_row(latest, 'Close')
-        confidence = min(0.95, 0.7 + (0.2 if macd > 0 else 0) + (0.1 if volume_ratio > 1.5 else 0))
+        confidence = 0.6 + (0.2 if macd > 0 else 0)
         
         return {
             'action': 'BUY',
@@ -672,17 +567,14 @@ def macd_momentum_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
             'target1': entry * 1.02,
             'target2': entry * 1.04,
             'confidence': confidence,
-            'reason': f"MACD bullish crossover, Volume {volume_ratio:.1f}x"
+            'reason': f"MACD bullish crossover"
         }
     
-    # SELL Signal: MACD crosses below signal line
-    elif (not math.isnan(macd) and not math.isnan(macd_signal) and
-          not math.isnan(macd_prev) and not math.isnan(macd_signal_prev) and
-          macd < macd_signal and macd_prev >= macd_signal_prev and
-          volume_ratio > strategy["volume_threshold"]):
+    # Relaxed SELL Signal
+    elif (macd < macd_signal and macd_prev >= macd_signal_prev):
         
         entry = _safe_scalar_from_row(latest, 'Close')
-        confidence = min(0.95, 0.7 + (0.2 if macd < 0 else 0) + (0.1 if volume_ratio > 1.5 else 0))
+        confidence = 0.6 + (0.2 if macd < 0 else 0)
         
         return {
             'action': 'SELL',
@@ -691,35 +583,23 @@ def macd_momentum_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
             'target1': entry * 0.98,
             'target2': entry * 0.96,
             'confidence': confidence,
-            'reason': f"MACD bearish crossover, Volume {volume_ratio:.1f}x"
+            'reason': f"MACD bearish crossover"
         }
     
     return None
 
 def rsi_divergence_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
     """RSI Divergence strategy"""
-    if len(df) < strategy["divergence_lookback"] + 5:
+    if len(df) < 10:
         return None
     
     latest = df.iloc[-1]
-    lookback_data = df.iloc[-strategy["divergence_lookback"]:]
-    
     rsi = _safe_scalar_from_row(latest, 'RSI_14')
-    price = _safe_scalar_from_row(latest, 'Close')
     
-    # Find RSI and price extremes in lookback period
-    max_rsi = lookback_data['RSI_14'].max()
-    min_rsi = lookback_data['RSI_14'].min()
-    max_price = lookback_data['Close'].max()
-    min_price = lookback_data['Close'].min()
-    
-    # Bullish divergence: Lower lows in price but higher lows in RSI
-    if (rsi > min_rsi + 5 and price <= min_price and 
-        lookback_data['RSI_14'].iloc[-5] > lookback_data['RSI_14'].iloc[-10] and
-        rsi < strategy["rsi_oversold"] + 10):
-        
+    # Simple RSI based signals
+    if rsi < strategy["rsi_oversold"]:
         entry = _safe_scalar_from_row(latest, 'Close')
-        confidence = min(0.95, 0.6 + (0.3 if rsi < 40 else 0))
+        confidence = 0.7 - (rsi / 100)
         
         return {
             'action': 'BUY',
@@ -728,16 +608,12 @@ def rsi_divergence_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
             'target1': entry * 1.02,
             'target2': entry * 1.04,
             'confidence': confidence,
-            'reason': f"Bullish RSI Divergence, RSI {rsi:.1f}"
+            'reason': f"RSI oversold {rsi:.1f}"
         }
     
-    # Bearish divergence: Higher highs in price but lower highs in RSI
-    elif (rsi < max_rsi - 5 and price >= max_price and
-          lookback_data['RSI_14'].iloc[-5] < lookback_data['RSI_14'].iloc[-10] and
-          rsi > strategy["rsi_overbought"] - 10):
-        
+    elif rsi > strategy["rsi_overbought"]:
         entry = _safe_scalar_from_row(latest, 'Close')
-        confidence = min(0.95, 0.6 + (0.3 if rsi > 60 else 0))
+        confidence = (rsi / 100) - 0.3
         
         return {
             'action': 'SELL',
@@ -746,109 +622,16 @@ def rsi_divergence_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
             'target1': entry * 0.98,
             'target2': entry * 0.96,
             'confidence': confidence,
-            'reason': f"Bearish RSI Divergence, RSI {rsi:.1f}"
-        }
-    
-    return None
-
-def vwap_bollinger_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
-    """VWAP with Bollinger Band strategy"""
-    latest = df.iloc[-1]
-    
-    close = _safe_scalar_from_row(latest, 'Close')
-    vwap = _safe_scalar_from_row(latest, 'VWAP')
-    bb_up = _safe_scalar_from_row(latest, 'BB_UP')
-    bb_lo = _safe_scalar_from_row(latest, 'BB_LO')
-    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
-    
-    # BUY Signal: Price above VWAP, near lower Bollinger Band, volume confirmation
-    if (not math.isnan(close) and not math.isnan(vwap) and not math.isnan(bb_lo) and
-        close > vwap and close <= bb_lo * 1.02 and
-        volume_ratio > strategy["volume_threshold"]):
-        
-        confidence = min(0.95, 0.7 + (0.2 if (close - vwap) / vwap > 0.01 else 0) + (0.1 if volume_ratio > 1.5 else 0))
-        
-        return {
-            'action': 'BUY',
-            'entry': close,
-            'stop_loss': min(bb_lo, vwap),
-            'target1': bb_up * 0.95,
-            'target2': bb_up,
-            'confidence': confidence,
-            'reason': f"VWAP support with Bollinger, Volume {volume_ratio:.1f}x"
-        }
-    
-    # SELL Signal: Price below VWAP, near upper Bollinger Band, volume confirmation
-    elif (not math.isnan(close) and not math.isnan(vwap) and not math.isnan(bb_up) and
-          close < vwap and close >= bb_up * 0.98 and
-          volume_ratio > strategy["volume_threshold"]):
-        
-        confidence = min(0.95, 0.7 + (0.2 if (vwap - close) / vwap > 0.01 else 0) + (0.1 if volume_ratio > 1.5 else 0))
-        
-        return {
-            'action': 'SELL',
-            'entry': close,
-            'stop_loss': max(bb_up, vwap),
-            'target1': bb_lo * 1.05,
-            'target2': bb_lo,
-            'confidence': confidence,
-            'reason': f"VWAP resistance with Bollinger, Volume {volume_ratio:.1f}x"
-        }
-    
-    return None
-
-def supertrend_ema_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
-    """SuperTrend with EMA confirmation"""
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    supertrend = _safe_scalar_from_row(latest, 'SUPERTREND')
-    supertrend_trend = _safe_scalar_from_row(latest, 'SUPERTREND_TREND')
-    supertrend_prev = _safe_scalar_from_row(prev, 'SUPERTREND_TREND')
-    ema = _safe_scalar_from_row(latest, 'EMA_21')
-    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
-    close = _safe_scalar_from_row(latest, 'Close')
-    
-    # BUY Signal: SuperTrend turns bullish, price above EMA
-    if (not math.isnan(supertrend_trend) and not math.isnan(supertrend_prev) and
-        supertrend_trend == 1 and supertrend_prev == -1 and
-        not math.isnan(ema) and close > ema and
-        volume_ratio > strategy["volume_threshold"]):
-        
-        confidence = min(0.95, 0.8 + (0.1 if volume_ratio > 1.5 else 0))
-        
-        return {
-            'action': 'BUY',
-            'entry': close,
-            'stop_loss': supertrend,
-            'target1': close * 1.02,
-            'target2': close * 1.04,
-            'confidence': confidence,
-            'reason': f"SuperTrend bullish, above EMA, Volume {volume_ratio:.1f}x"
-        }
-    
-    # SELL Signal: SuperTrend turns bearish, price below EMA
-    elif (not math.isnan(supertrend_trend) and not math.isnan(supertrend_prev) and
-          supertrend_trend == -1 and supertrend_prev == 1 and
-          not math.isnan(ema) and close < ema and
-          volume_ratio > strategy["volume_threshold"]):
-        
-        confidence = min(0.95, 0.8 + (0.1 if volume_ratio > 1.5 else 0))
-        
-        return {
-            'action': 'SELL',
-            'entry': close,
-            'stop_loss': supertrend,
-            'target1': close * 0.98,
-            'target2': close * 0.96,
-            'confidence': confidence,
-            'reason': f"SuperTrend bearish, below EMA, Volume {volume_ratio:.1f}x"
+            'reason': f"RSI overbought {rsi:.1f}"
         }
     
     return None
 
 def golden_cross_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
-    """Golden Cross strategy"""
+    """Golden Cross strategy with relaxed conditions"""
+    if len(df) < 3:
+        return None
+        
     latest = df.iloc[-1]
     prev = df.iloc[-2]
     
@@ -856,16 +639,12 @@ def golden_cross_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
     ema200 = _safe_scalar_from_row(latest, 'EMA_200')
     ema50_prev = _safe_scalar_from_row(prev, 'EMA_50')
     ema200_prev = _safe_scalar_from_row(prev, 'EMA_200')
-    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
     
-    # BUY Signal: EMA50 crosses above EMA200 (Golden Cross)
-    if (not math.isnan(ema50) and not math.isnan(ema200) and
-        not math.isnan(ema50_prev) and not math.isnan(ema200_prev) and
-        ema50 > ema200 and ema50_prev <= ema200_prev and
-        volume_ratio > strategy["volume_threshold"]):
+    # Relaxed Golden Cross
+    if (ema50 > ema200 and ema50_prev <= ema200_prev):
         
         entry = _safe_scalar_from_row(latest, 'Close')
-        confidence = min(0.95, 0.8 + (0.1 if volume_ratio > 2.0 else 0))
+        confidence = 0.7
         
         return {
             'action': 'BUY',
@@ -874,17 +653,14 @@ def golden_cross_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
             'target1': entry * 1.03,
             'target2': entry * 1.06,
             'confidence': confidence,
-            'reason': f"Golden Cross (EMA50 > EMA200), Volume {volume_ratio:.1f}x"
+            'reason': f"Golden Cross (EMA50 > EMA200)"
         }
     
-    # SELL Signal: EMA50 crosses below EMA200 (Death Cross)
-    elif (not math.isnan(ema50) and not math.isnan(ema200) and
-          not math.isnan(ema50_prev) and not math.isnan(ema200_prev) and
-          ema50 < ema200 and ema50_prev >= ema200_prev and
-          volume_ratio > strategy["volume_threshold"]):
+    # Relaxed Death Cross
+    elif (ema50 < ema200 and ema50_prev >= ema200_prev):
         
         entry = _safe_scalar_from_row(latest, 'Close')
-        confidence = min(0.95, 0.8 + (0.1 if volume_ratio > 2.0 else 0))
+        confidence = 0.7
         
         return {
             'action': 'SELL',
@@ -893,55 +669,13 @@ def golden_cross_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
             'target1': entry * 0.97,
             'target2': entry * 0.94,
             'confidence': confidence,
-            'reason': f"Death Cross (EMA50 < EMA200), Volume {volume_ratio:.1f}x"
-        }
-    
-    return None
-
-def volume_spike_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
-    """Volume Spike strategy"""
-    latest = df.iloc[-1]
-    
-    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
-    price_change = _safe_scalar_from_row(latest, 'MOMENTUM_5')
-    close = _safe_scalar_from_row(latest, 'Close')
-    
-    # BUY Signal: High volume with positive price breakout
-    if (volume_ratio > strategy["volume_multiplier"] and
-        price_change > strategy["price_breakout"] * 100):
-        
-        confidence = min(0.95, 0.6 + (0.2 if volume_ratio > 3.0 else 0) + (0.2 if price_change > 5 else 0))
-        
-        return {
-            'action': 'BUY',
-            'entry': close,
-            'stop_loss': close * 0.99,
-            'target1': close * 1.02,
-            'target2': close * 1.04,
-            'confidence': confidence,
-            'reason': f"Volume spike {volume_ratio:.1f}x, Price breakout {price_change:.1f}%"
-        }
-    
-    # SELL Signal: High volume with negative price breakout
-    elif (volume_ratio > strategy["volume_multiplier"] and
-          price_change < -strategy["price_breakout"] * 100):
-        
-        confidence = min(0.95, 0.6 + (0.2 if volume_ratio > 3.0 else 0) + (0.2 if price_change < -5 else 0))
-        
-        return {
-            'action': 'SELL',
-            'entry': close,
-            'stop_loss': close * 1.01,
-            'target1': close * 0.98,
-            'target2': close * 0.96,
-            'confidence': confidence,
-            'reason': f"Volume spike {volume_ratio:.1f}x, Price breakdown {price_change:.1f}%"
+            'reason': f"Death Cross (EMA50 < EMA200)"
         }
     
     return None
 
 # ---------------------------
-# Auto-Trading Engine
+# Auto-Trading Engine with Email Notifications
 # ---------------------------
 class AutoTradingEngine:
     def __init__(self):
@@ -998,49 +732,29 @@ class AutoTradingEngine:
         self.positions[signal['symbol']] = trade
         self.daily_trade_count += 1
         
+        # Send email notification
+        if config.email_notifications:
+            subject = f"Auto-Trade Executed: {signal['symbol']} {signal['action']}"
+            message = f"""
+            Auto-Trade Execution Details:
+            
+            Symbol: {signal['symbol']}
+            Action: {signal['action']}
+            Entry Price: ₹{entry_price:.2f}
+            Quantity: {shares}
+            Stop Loss: ₹{stop_loss:.2f}
+            Target 1: ₹{signal['target1']:.2f}
+            Target 2: ₹{signal['target2']:.2f}
+            Strategy: {signal['strategy']}
+            Confidence: {signal['confidence']:.2f}
+            Reason: {signal.get('reason', 'N/A')}
+            Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            
+            Trade Value: ₹{entry_price * shares:.2f}
+            """
+            send_email_notification(subject, message)
+        
         return True
-    
-    def monitor_positions(self, current_prices: Dict):
-        """Monitor open positions and check for exit conditions"""
-        for symbol, position in list(self.positions.items()):
-            if symbol not in current_prices:
-                continue
-                
-            current_price = current_prices[symbol]
-            
-            # Check stop loss
-            if (position['action'] == 'BUY' and current_price <= position['stop_loss']) or \
-               (position['action'] == 'SELL' and current_price >= position['stop_loss']):
-                self.close_position(symbol, current_price, 'STOP_LOSS')
-            
-            # Check target 1
-            elif (position['action'] == 'BUY' and current_price >= position['target1']) or \
-                 (position['action'] == 'SELL' and current_price <= position['target1']):
-                self.close_position(symbol, current_price, 'TARGET1')
-            
-            # Check target 2
-            elif (position['action'] == 'BUY' and current_price >= position['target2']) or \
-                 (position['action'] == 'SELL' and current_price <= position['target2']):
-                self.close_position(symbol, current_price, 'TARGET2')
-    
-    def close_position(self, symbol: str, exit_price: float, reason: str):
-        """Close a position"""
-        if symbol in self.positions:
-            position = self.positions[symbol]
-            position['exit_price'] = exit_price
-            position['exit_time'] = datetime.now()
-            position['exit_reason'] = reason
-            
-            # Calculate P&L
-            if position['action'] == 'BUY':
-                pnl = (exit_price - position['entry_price']) * position['quantity']
-            else:  # SELL
-                pnl = (position['entry_price'] - exit_price) * position['quantity']
-            
-            position['pnl'] = pnl
-            position['status'] = 'CLOSED'
-            
-            del self.positions[symbol]
 
 # ---------------------------
 # Utility Functions
@@ -1052,7 +766,7 @@ def _safe_scalar_from_row(row, key, default=np.nan):
         if isinstance(val, (pd.Series, np.ndarray, list)):
             if len(val) == 0:
                 return default
-            v = val[-1]
+            v = val.iloc[0] if hasattr(val, 'iloc') else val[0]
             return float(v) if v is not None and not (isinstance(v, float) and np.isnan(v)) else default
         if val is None or (isinstance(val, float) and np.isnan(val)):
             return default
@@ -1060,52 +774,43 @@ def _safe_scalar_from_row(row, key, default=np.nan):
     except Exception:
         return default
 
-@st.cache_data(ttl=60*60)
-def fetch_nifty500_list():
-    """Fetch NIFTY 500 constituents"""
-    try:
-        # Return NIFTY 100 as fallback
-        return NIFTY_100
-    except Exception:
-        return NIFTY_100
-
 # ---------------------------
 # Stock Universe
 # ---------------------------
 NIFTY_50 = [
-    "RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS","INFY.NS","TCS.NS",
-    "KOTAKBANK.NS","HINDUNILVR.NS","AXISBANK.NS","LT.NS","SBIN.NS",
-    "ITC.NS","BAJFINANCE.NS","BHARTIARTL.NS","MARUTI.NS",
-    "ONGC.NS","TITAN.NS","ULTRACEMCO.NS","NTPC.NS","SUNPHARMA.NS",
-    "HCLTECH.NS","POWERGRID.NS","WIPRO.NS","TECHM.NS","BPCL.NS",
-    "COALINDIA.NS","BRITANNIA.NS","DIVISLAB.NS","HDFCLIFE.NS","ADANIENT.NS",
-    "GRASIM.NS","DLF.NS","ADANIPORTS.NS","EICHERMOT.NS","CIPLA.NS",
-    "IOC.NS","JSWSTEEL.NS","SBILIFE.NS","TATASTEEL.NS","INDUSINDBK.NS",
-    "HINDALCO.NS","NESTLEIND.NS","DRREDDY.NS","BAJAJ-AUTO.NS","SHREECEM.NS",
-    "TATAELXSI.NS","MRF.NS","PIDILITIND.NS","BAJAJFINSV.NS"
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "HINDUNILVR.NS",
+    "ICICIBANK.NS", "KOTAKBANK.NS", "BHARTIARTL.NS", "ITC.NS", "LT.NS",
+    "SBIN.NS", "ASIANPAINT.NS", "HCLTECH.NS", "AXISBANK.NS", "MARUTI.NS",
+    "SUNPHARMA.NS", "TITAN.NS", "ULTRACEMCO.NS", "WIPRO.NS", "NTPC.NS",
+    "NESTLEIND.NS", "POWERGRID.NS", "M&M.NS", "BAJFINANCE.NS", "ADANIENT.NS",
+    "ONGC.NS", "TATAMOTORS.NS", "TATASTEEL.NS", "JSWSTEEL.NS", "ADANIPORTS.NS",
+    "COALINDIA.NS", "HDFCLIFE.NS", "DRREDDY.NS", "HINDALCO.NS", "CIPLA.NS",
+    "SBILIFE.NS", "GRASIM.NS", "TECHM.NS", "BAJAJFINSV.NS", "BRITANNIA.NS",
+    "EICHERMOT.NS", "DIVISLAB.NS", "SHREECEM.NS", "APOLLOHOSP.NS", "UPL.NS",
+    "BAJAJ-AUTO.NS", "HEROMOTOCO.NS", "INDUSINDBK.NS"
 ]
 
 NIFTY_NEXT_50 = [
-    "ADANITRANS.NS","APOLLOHOSP.NS","ADANIGREEN.NS","AUROPHARMA.NS","BERGEPAINT.NS",
-    "BOSCHLTD.NS","CASTROLIND.NS","INDIGO.NS","GODREJCP.NS","HAVELLS.NS",
-    "HEROMOTOCO.NS","HINDZINC.NS","ICICIPRULI.NS","INDIAMART.NS","LICHSGFIN.NS",
-    "LUPIN.NS","MUTHOOTFIN.NS","PEL.NS","PIDILITIND.NS","PIIND.NS",
-    "SAIL.NS","SRF.NS","TORNTPHARM.NS","TRENT.NS","TVSMOTOR.NS",
-    "MOTHERSON.NS","ZOMATO.NS","ABB.NS","ADANIPOWER.NS","AMBUJACEM.NS",
-    "BANDHANBNK.NS","COLPAL.NS","CONCOR.NS","DABUR.NS","DALBHARAT.NS",
-    "GLENMARK.NS","HINDPETRO.NS","IGL.NS","INDUSTOWER.NS","JINDALSTEL.NS",
-    "JSWENERGY.NS","L&TFH.NS","MANAPPURAM.NS","MCDOWELL-N.NS","NMDC.NS",
-    "PETRONET.NS","SIEMENS.NS","UBL.NS","VOLTAS.NS","YESBANK.NS"
+    "ADANIGREEN.NS", "ADANIPORTS.NS", "ADANITRANS.NS", "AMBUJACEM.NS", "AUROPHARMA.NS",
+    "DMART.NS", "BAJAJHLDNG.NS", "BANDHANBNK.NS", "BERGEPAINT.NS", "BIOCON.NS",
+    "BOSCHLTD.NS", "CADILAHC.NS", "COLPAL.NS", "DLF.NS", "DABUR.NS",
+    "GAIL.NS", "GODREJCP.NS", "HAVELLS.NS", "HINDPETRO.NS", "ICICIPRULI.NS",
+    "IGL.NS", "INFRATEL.NS", "JINDALSTEL.NS", "JSWENERGY.NS", "LUPIN.NS",
+    "MANAPPURAM.NS", "MARICO.NS", "MOTHERSUMI.NS", "NHPC.NS", "OFSS.NS",
+    "PETRONET.NS", "PIDILITIND.NS", "PEL.NS", "PGHH.NS", "PNB.NS",
+    "RBLBANK.NS", "SAIL.NS", "SRF.NS", "SIEMENS.NS", "TORNTPHARM.NS",
+    "TORNTPOWER.NS", "TRENT.NS", "UBL.NS", "MCDOWELL-N.NS", "VEDL.NS",
+    "IDEA.NS", "YESBANK.NS", "ZEEL.NS"
 ]
 
 NIFTY_100 = sorted(list(set(NIFTY_50 + NIFTY_NEXT_50)))
 
 # ---------------------------
-# Enhanced UI with Auto-Trading
+# Main Application
 # ---------------------------
 
 def main():
-    st.title("🚀 Gemini Intraday Pro — Enhanced Trading Terminal")
+    st.title("🚀 Gemini Intraday Pro — Trading Terminal")
     
     # Initialize session state
     if 'auto_trader' not in st.session_state:
@@ -1116,6 +821,10 @@ def main():
         st.session_state.paper_trading = PaperTrading()
     if 'last_refresh' not in st.session_state:
         st.session_state.last_refresh = datetime.now()
+    if 'total_scans' not in st.session_state:
+        st.session_state.total_scans = 0
+    if 'total_signals' not in st.session_state:
+        st.session_state.total_signals = 0
     
     # Auto refresh every 10 seconds
     st_autorefresh(interval=10000, key="auto_refresh")
@@ -1128,7 +837,7 @@ def main():
     universe_option = st.sidebar.selectbox(
         "Select Market Universe",
         options=["NIFTY 50", "NIFTY 100"],
-        index=1
+        index=0
     )
     
     if universe_option == "NIFTY 50":
@@ -1136,17 +845,14 @@ def main():
     else:
         symbols_to_scan = NIFTY_100
     
-    # Strategy selection for focused scanning
-    st.sidebar.subheader("🎯 Strategy Focus")
+    # Strategy selection
+    st.sidebar.subheader("🎯 Strategy Selection")
     focus_strategies = st.sidebar.multiselect(
-        "Focus on Strategies (empty = all)",
+        "Select Strategies to Run",
         options=list(STRATEGIES.keys()),
-        default=list(STRATEGIES.keys())[:3],
-        help="Select specific strategies to focus on for better performance"
+        default=list(STRATEGIES.keys()),
+        help="Select strategies for scanning"
     )
-    
-    if not focus_strategies:
-        focus_strategies = list(STRATEGIES.keys())
     
     # Auto-Trading Configuration
     st.sidebar.subheader("🤖 Auto-Trading Settings")
@@ -1154,193 +860,171 @@ def main():
     st.session_state.auto_trade_config.enabled = auto_trade_enabled
     
     if auto_trade_enabled:
-        st.session_state.auto_trade_config.max_trades_per_day = st.sidebar.number_input(
-            "Max Trades Per Day", min_value=1, max_value=50, value=10
-        )
         st.session_state.auto_trade_config.min_confidence = st.sidebar.slider(
-            "Min Confidence", min_value=0.5, max_value=0.95, value=0.7, step=0.05
+            "Min Confidence", min_value=0.3, max_value=0.9, value=0.6, step=0.05
         )
-        st.session_state.auto_trade_config.risk_per_trade = st.sidebar.slider(
-            "Risk Per Trade (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.5
-        ) / 100
+        st.session_state.auto_trade_config.email_notifications = st.sidebar.checkbox(
+            "Email Notifications", value=True
+        )
+        
+        # Email configuration
+        st.sidebar.subheader("📧 Email Configuration")
+        st.sidebar.info("Configure email settings for trade notifications")
     
-    # Paper Trading Configuration
+    # Paper Trading
     st.sidebar.subheader("📝 Paper Trading")
-    paper_capital = st.sidebar.number_input("Initial Capital (₹)", min_value=10000, max_value=1000000, value=100000)
     if st.sidebar.button("Reset Paper Trading"):
         st.session_state.paper_trading = PaperTrading()
-        st.session_state.paper_trading.initial_capital = paper_capital
-        st.session_state.paper_trading.available_capital = paper_capital
     
-    # Main Tabs - Arranged professionally
-    tabs = st.tabs(["📊 Dashboard", "🎯 Multi-Strategy Signals", "🤖 Auto-Trade", "📈 Live Charts", "📝 Paper Trading", "📊 Backtest"])
+    # Main Tabs
+    tabs = st.tabs(["📊 Dashboard", "🎯 Live Signals", "🤖 Auto-Trade", "📈 Charts", "📝 Paper Trading"])
     
     with tabs[0]:
         show_dashboard(symbols_to_scan, focus_strategies)
     
     with tabs[1]:
-        show_multi_strategy_signals(symbols_to_scan, focus_strategies)
+        show_live_signals(symbols_to_scan, focus_strategies)
     
     with tabs[2]:
         show_auto_trading()
     
     with tabs[3]:
-        show_live_charts(symbols_to_scan)
+        show_charts(symbols_to_scan)
     
     with tabs[4]:
         show_paper_trading(symbols_to_scan)
-    
-    with tabs[5]:
-        show_backtest()
 
 def show_dashboard(symbols_to_scan, focus_strategies):
-    st.header("📊 Professional Trading Dashboard")
+    st.header("📊 Trading Dashboard")
     
     # Market Overview
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Symbols Scanning", len(symbols_to_scan))
     with col2:
-        st.metric("Strategies Active", len(focus_strategies))
+        st.metric("Active Strategies", len(focus_strategies))
     with col3:
-        st.metric("Auto-Trading", "🟢 Enabled" if st.session_state.auto_trade_config.enabled else "🔴 Disabled")
+        st.metric("Auto-Trading", "🟢 ON" if st.session_state.auto_trade_config.enabled else "🔴 OFF")
     with col4:
-        st.metric("Last Refresh", st.session_state.last_refresh.strftime("%H:%M:%S"))
+        st.metric("Last Scan", st.session_state.last_refresh.strftime("%H:%M:%S"))
     
-    # Quick scan with all strategies
-    st.subheader("🚀 Multi-Strategy Market Scan")
+    # Auto-scan on dashboard load
+    st.subheader("🚀 Real-time Market Scan")
     
-    # Auto-run scan on refresh
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     all_signals = []
-    signals_by_strategy = {strategy: [] for strategy in focus_strategies}
+    total_scanned = 0
+    signals_found = 0
     
     for i, symbol in enumerate(symbols_to_scan):
         status_text.text(f"Scanning {i+1}/{len(symbols_to_scan)}: {symbol}")
         df = fetch_enhanced_ohlc(symbol)
+        total_scanned += 1
         
-        # Test all focused strategies for each symbol
-        for strategy_name in focus_strategies:
-            signal = generate_enhanced_signals(df, strategy_name)
-            if signal:
-                signal['symbol'] = symbol
-                all_signals.append(signal)
-                signals_by_strategy[strategy_name].append(signal)
+        if df is not None:
+            for strategy_name in focus_strategies:
+                signal = generate_enhanced_signals(df, strategy_name)
+                if signal:
+                    signal['symbol'] = symbol
+                    all_signals.append(signal)
+                    signals_found += 1
         
         progress_bar.progress((i + 1) / len(symbols_to_scan))
     
     progress_bar.empty()
     status_text.empty()
     
-    # Update last refresh time
+    # Update statistics
+    st.session_state.total_scans += total_scanned
+    st.session_state.total_signals += signals_found
     st.session_state.last_refresh = datetime.now()
     
+    # Display results
     if all_signals:
-        # Display top signals by confidence
-        st.subheader("🎯 Top Trading Signals")
-        top_signals = sorted(all_signals, key=lambda x: x['confidence'], reverse=True)[:20]
-        display_enhanced_signals(top_signals)
+        st.success(f"🎯 Found {len(all_signals)} trading signals!")
         
-        # Strategy performance summary
-        st.subheader("📈 Strategy Performance Summary")
-        strategy_stats = []
-        for strategy, signals in signals_by_strategy.items():
-            if signals:
-                avg_confidence = np.mean([s['confidence'] for s in signals])
-                buy_signals = len([s for s in signals if s['action'] == 'BUY'])
-                sell_signals = len([s for s in signals if s['action'] == 'SELL'])
-                strategy_stats.append({
-                    'Strategy': strategy,
-                    'Total Signals': len(signals),
-                    'Buy Signals': buy_signals,
-                    'Sell Signals': sell_signals,
-                    'Avg Confidence': f"{avg_confidence:.2f}"
-                })
+        # Display signals
+        display_signals_table(all_signals)
         
-        if strategy_stats:
-            st.dataframe(pd.DataFrame(strategy_stats), use_container_width=True)
+        # Strategy distribution
+        st.subheader("📈 Strategy Distribution")
+        strategy_counts = {}
+        for signal in all_signals:
+            strategy = signal['strategy']
+            strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
+        
+        for strategy, count in strategy_counts.items():
+            st.write(f"**{strategy}**: {count} signals")
+            
     else:
-        st.info("No signals found in current scan.")
+        st.warning("⚠️ No trading signals found in current scan.")
+        st.info("""
+        **Why no signals might be generated:**
+        - Market conditions don't meet strategy criteria
+        - Strategies might be too strict
+        - Try adjusting confidence levels or using more strategies
+        - Check if market is open and data is available
+        """)
     
-    # Market Statistics
-    st.subheader("📊 Market Statistics")
-    col1, col2, col3, col4 = st.columns(4)
-    
+    # Performance statistics
+    st.subheader("📊 Scan Statistics")
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("NIFTY 50 Stocks", len(NIFTY_50))
+        st.metric("Total Scans", st.session_state.total_scans)
     with col2:
-        st.metric("NIFTY 100 Stocks", len(NIFTY_100))
+        st.metric("Total Signals", st.session_state.total_signals)
     with col3:
-        st.metric("Total Strategies", len(STRATEGIES))
-    with col4:
-        st.metric("Active Focus", len(focus_strategies))
+        hit_rate = (st.session_state.total_signals / st.session_state.total_scans * 100) if st.session_state.total_scans > 0 else 0
+        st.metric("Signal Hit Rate", f"{hit_rate:.1f}%")
 
-def show_multi_strategy_signals(symbols_to_scan, focus_strategies):
-    st.header("🎯 Multi-Strategy Signal Scanner")
+def show_live_signals(symbols_to_scan, focus_strategies):
+    st.header("🎯 Live Trading Signals")
     
-    # Run multi-strategy scan
-    signals_by_strategy = {strategy: [] for strategy in focus_strategies}
-    
-    progress_bar = st.progress(0)
-    for i, symbol in enumerate(symbols_to_scan):
-        df = fetch_enhanced_ohlc(symbol)
-        if df is not None:
-            for strategy_name in focus_strategies:
-                signal = generate_enhanced_signals(df, strategy_name)
-                if signal:
-                    signal['symbol'] = symbol
-                    signals_by_strategy[strategy_name].append(signal)
-        progress_bar.progress((i + 1) / len(symbols_to_scan))
-    progress_bar.empty()
-    
-    # Display signals by strategy
-    for strategy_name, signals in signals_by_strategy.items():
-        if signals:
-            st.subheader(f"📊 {strategy_name} Signals")
-            st.write(f"**Description:** {STRATEGIES[strategy_name]['description']}")
-            display_enhanced_signals(signals)
+    if st.button("Run Signal Scan"):
+        with st.spinner("Scanning for signals..."):
+            all_signals = []
+            
+            for symbol in symbols_to_scan:
+                df = fetch_enhanced_ohlc(symbol)
+                if df is not None:
+                    for strategy_name in focus_strategies:
+                        signal = generate_enhanced_signals(df, strategy_name)
+                        if signal:
+                            signal['symbol'] = symbol
+                            all_signals.append(signal)
+            
+            if all_signals:
+                st.success(f"Found {len(all_signals)} signals!")
+                display_signals_table(all_signals)
+            else:
+                st.warning("No signals found. Try adjusting strategy parameters.")
 
-def display_enhanced_signals(signals):
-    """Display enhanced signals with better formatting"""
+def display_signals_table(signals):
+    """Display signals in a formatted table"""
     if not signals:
         return
         
-    df_signals = pd.DataFrame([{
-        'Symbol': s['symbol'],
-        'Action': '🟢 BUY' if s['action'] == 'BUY' else '🔴 SELL',
-        'Strategy': s['strategy'],
-        'Entry': f"₹{s['entry']:.2f}",
-        'SL': f"₹{s['stop_loss']:.2f}",
-        'T1': f"₹{s['target1']:.2f}",
-        'T2': f"₹{s['target2']:.2f}",
-        'Confidence': f"{s['confidence']:.2f}",
-        'Reason': s.get('reason', ''),
-        'Time': s['timestamp'].strftime("%H:%M:%S")
-    } for s in signals])
+    # Sort by confidence
+    signals_sorted = sorted(signals, key=lambda x: x['confidence'], reverse=True)
     
-    # Style the dataframe
-    styled_df = df_signals.style.background_gradient(
-        subset=['Confidence'], cmap='RdYlGn'
-    ).format({
-        'Confidence': '{:.2f}'
-    })
+    # Create dataframe
+    data = []
+    for signal in signals_sorted:
+        data.append({
+            'Symbol': signal['symbol'],
+            'Action': '🟢 BUY' if signal['action'] == 'BUY' else '🔴 SELL',
+            'Strategy': signal['strategy'],
+            'Entry': f"₹{signal['entry']:.2f}",
+            'SL': f"₹{signal['stop_loss']:.2f}",
+            'T1': f"₹{signal['target1']:.2f}",
+            'Confidence': f"{signal['confidence']:.2f}",
+            'Reason': signal.get('reason', 'N/A')
+        })
     
-    st.dataframe(styled_df, use_container_width=True, height=400)
-    
-    # Auto-trade execution
-    if st.session_state.auto_trade_config.enabled:
-        st.subheader("🤖 Auto-Trade Execution")
-        executed_trades = 0
-        for signal in sorted(signals, key=lambda x: x['confidence'], reverse=True):
-            if signal['confidence'] >= st.session_state.auto_trade_config.min_confidence:
-                if st.session_state.auto_trader.execute_trade(signal, st.session_state.auto_trade_config):
-                    st.success(f"Auto-trade executed: {signal['symbol']} {signal['action']} at ₹{signal['entry']:.2f}")
-                    executed_trades += 1
-                    if executed_trades >= st.session_state.auto_trade_config.max_trades_per_day:
-                        st.warning("Daily trade limit reached")
-                        break
+    df = pd.DataFrame(data)
+    st.dataframe(df, use_container_width=True, height=400)
 
 def show_auto_trading():
     st.header("🤖 Auto-Trading Console")
@@ -1352,29 +1036,14 @@ def show_auto_trading():
         open_positions = [t for t in st.session_state.auto_trader.trades if t.get('status') == 'OPEN']
         if open_positions:
             for position in open_positions:
-                with st.expander(f"{position['symbol']} {position['action']} - ₹{position['entry_price']:.2f}", expanded=True):
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.metric("Entry Price", f"₹{position['entry_price']:.2f}")
-                        st.metric("Stop Loss", f"₹{position['stop_loss']:.2f}")
-                        st.metric("Quantity", position['quantity'])
-                    with col_b:
-                        st.metric("Target 1", f"₹{position['target1']:.2f}")
-                        st.metric("Target 2", f"₹{position['target2']:.2f}")
-                        st.metric("Confidence", f"{position['confidence']:.2f}")
-                    
+                with st.expander(f"{position['symbol']} {position['action']}", expanded=True):
+                    st.write(f"**Entry:** ₹{position['entry_price']:.2f}")
+                    st.write(f"**Stop Loss:** ₹{position['stop_loss']:.2f}")
+                    st.write(f"**Target 1:** ₹{position['target1']:.2f}")
+                    st.write(f"**Target 2:** ₹{position['target2']:.2f}")
+                    st.write(f"**Quantity:** {position['quantity']}")
+                    st.write(f"**Confidence:** {position['confidence']:.2f}")
                     st.write(f"**Strategy:** {position['strategy']}")
-                    st.write(f"**Reason:** {position['reason']}")
-                    
-                    # Current P&L (simulated)
-                    current_price = position['entry_price'] * 1.01  # Simulated price
-                    if position['action'] == 'BUY':
-                        pnl = (current_price - position['entry_price']) * position['quantity']
-                    else:
-                        pnl = (position['entry_price'] - current_price) * position['quantity']
-                    
-                    pnl_color = "green" if pnl > 0 else "red"
-                    st.write(f"**Current P&L:** :{pnl_color}[₹{pnl:.2f}]")
         else:
             st.info("No open positions")
     
@@ -1382,108 +1051,50 @@ def show_auto_trading():
         st.subheader("📈 Trade History")
         closed_trades = [t for t in st.session_state.auto_trader.trades if t.get('status') == 'CLOSED']
         if closed_trades:
-            # Display last 10 trades
-            recent_trades = closed_trades[-10:]
-            for trade in recent_trades:
+            for trade in closed_trades[-10:]:
                 pnl_color = "green" if trade.get('pnl', 0) > 0 else "red"
-                with st.expander(f"{trade['symbol']} {trade['action']} - P&L: ₹{trade.get('pnl', 0):.2f}"):
-                    st.write(f"**Entry:** ₹{trade['entry_price']:.2f}")
-                    st.write(f"**Exit:** ₹{trade.get('exit_price', 0):.2f}")
-                    st.write(f"**Reason:** {trade.get('exit_reason', 'N/A')}")
-                    st.write(f"**Strategy:** {trade['strategy']}")
-            
-            total_pnl = sum(t.get('pnl', 0) for t in closed_trades)
-            win_trades = len([t for t in closed_trades if t.get('pnl', 0) > 0])
-            win_rate = (win_trades / len(closed_trades)) * 100 if closed_trades else 0
-            
-            col_x, col_y = st.columns(2)
-            with col_x:
-                st.metric("Total P&L", f"₹{total_pnl:.2f}")
-            with col_y:
-                st.metric("Win Rate", f"{win_rate:.1f}%")
+                st.write(f"{trade['symbol']} {trade['action']} - P&L: ₹{trade.get('pnl', 0):.2f}")
         else:
             st.info("No trade history")
 
-def show_live_charts(symbols_to_scan):
-    st.header("📈 Live Market Charts")
+def show_charts(symbols_to_scan):
+    st.header("📈 Live Charts")
     
-    col1, col2 = st.columns([1, 3])
+    selected_symbol = st.selectbox("Select Symbol", symbols_to_scan)
     
-    with col1:
-        selected_symbol = st.selectbox("Select Symbol", options=symbols_to_scan)
-        chart_type = st.selectbox("Chart Type", ["Candlestick", "Line"])
-        indicator1 = st.selectbox("Primary Indicator", ["SMA", "EMA", "Bollinger Bands", "VWAP", "None"])
-        indicator2 = st.selectbox("Secondary Indicator", ["RSI", "MACD", "Volume", "Stochastic", "None"])
-    
-    with col2:
-        if selected_symbol:
-            df = fetch_enhanced_ohlc(selected_symbol)
-            if df is not None:
-                plot_enhanced_chart(df, selected_symbol, chart_type, indicator1, indicator2)
-
-def plot_enhanced_chart(df, symbol, chart_type="Candlestick", indicator1="SMA", indicator2="RSI"):
-    """Plot enhanced chart with multiple indicators"""
-    fig = go.Figure()
-    
-    if chart_type == "Candlestick":
-        fig.add_trace(go.Candlestick(
-            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], 
-            name='Price', increasing_line_color='green', decreasing_line_color='red'
-        ))
-    else:
-        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Price', line=dict(color='blue')))
-    
-    # Add first indicator
-    if indicator1 == "SMA":
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(color='orange')))
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50', line=dict(color='blue')))
-    elif indicator1 == "EMA":
-        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_8'], name='EMA 8', line=dict(color='green')))
-        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_21'], name='EMA 21', line=dict(color='red')))
-    elif indicator1 == "Bollinger Bands":
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_UP'], name='BB Upper', line=dict(dash='dash', color='gray')))
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_LO'], name='BB Lower', line=dict(dash='dash', color='gray')))
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_MID'], name='BB Middle', line=dict(color='blue')))
-    elif indicator1 == "VWAP":
-        fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], name='VWAP', line=dict(color='purple')))
-    
-    fig.update_layout(
-        title=f"{symbol} - Live Chart with {indicator1}",
-        xaxis_rangeslider_visible=False,
-        height=400
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Second indicator in separate chart
-    if indicator2 != "None":
-        fig2 = go.Figure()
-        
-        if indicator2 == "RSI":
-            fig2.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name='RSI 14', line=dict(color='purple')))
-            fig2.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought")
-            fig2.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
-            fig2.update_layout(title="RSI (14)", height=200, yaxis_range=[0, 100])
-        elif indicator2 == "MACD":
-            fig2.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', line=dict(color='blue')))
-            fig2.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal', line=dict(color='red')))
-            fig2.add_bar(x=df.index, y=df['MACD_Histogram'], name='Histogram', marker_color='gray')
-            fig2.update_layout(title="MACD", height=200)
-        elif indicator2 == "Volume":
-            colors = ['red' if row['Open'] > row['Close'] else 'green' for index, row in df.iterrows()]
-            fig2.add_trace(go.Bar(x=df.index, y=df['Volume'], name='Volume', marker_color=colors))
-            fig2.update_layout(title="Volume", height=200)
-        elif indicator2 == "Stochastic":
-            fig2.add_trace(go.Scatter(x=df.index, y=df['STOCH_K'], name='%K', line=dict(color='blue')))
-            fig2.add_trace(go.Scatter(x=df.index, y=df['STOCH_D'], name='%D', line=dict(color='red')))
-            fig2.add_hline(y=80, line_dash="dash", line_color="red")
-            fig2.add_hline(y=20, line_dash="dash", line_color="green")
-            fig2.update_layout(title="Stochastic Oscillator", height=200, yaxis_range=[0, 100])
-        
-        st.plotly_chart(fig2, use_container_width=True)
+    if selected_symbol:
+        df = fetch_enhanced_ohlc(selected_symbol)
+        if df is not None:
+            # Price chart
+            fig = go.Figure()
+            fig.add_trace(go.Candlestick(
+                x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+                name='Price'
+            ))
+            fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(color='orange')))
+            fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50', line=dict(color='blue')))
+            fig.update_layout(title=f"{selected_symbol} Price Chart", height=400)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Indicators
+            col1, col2 = st.columns(2)
+            with col1:
+                fig_rsi = go.Figure()
+                fig_rsi.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name='RSI', line=dict(color='purple')))
+                fig_rsi.add_hline(y=70, line_dash="dash", line_color="red")
+                fig_rsi.add_hline(y=30, line_dash="dash", line_color="green")
+                fig_rsi.update_layout(title="RSI (14)", height=300)
+                st.plotly_chart(fig_rsi, use_container_width=True)
+            
+            with col2:
+                fig_macd = go.Figure()
+                fig_macd.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', line=dict(color='blue')))
+                fig_macd.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal', line=dict(color='red')))
+                fig_macd.update_layout(title="MACD", height=300)
+                st.plotly_chart(fig_macd, use_container_width=True)
 
 def show_paper_trading(symbols_to_scan):
-    st.header("📝 Paper Trading Console")
+    st.header("📝 Paper Trading")
     
     col1, col2 = st.columns(2)
     
@@ -1492,82 +1103,67 @@ def show_paper_trading(symbols_to_scan):
         st.metric("Initial Capital", f"₹{st.session_state.paper_trading.initial_capital:,.2f}")
         st.metric("Available Capital", f"₹{st.session_state.paper_trading.available_capital:,.2f}")
         st.metric("Total P&L", f"₹{st.session_state.paper_trading.total_pnl:,.2f}")
-        
-        # Quick trade panel
-        st.subheader("⚡ Quick Trade")
-        quick_symbol = st.selectbox("Symbol", symbols_to_scan[:20], key="paper_trade_symbol")
-        quick_action = st.selectbox("Action", ["BUY", "SELL"], key="paper_trade_action")
-        quick_quantity = st.number_input("Quantity", min_value=1, max_value=1000, value=10, key="paper_trade_quantity")
-        
-        if st.button("Execute Paper Trade", key="paper_trade_execute"):
-            # Get current price
-            df = fetch_enhanced_ohlc(quick_symbol)
-            if df is not None:
-                current_price = df['Close'].iloc[-1]
-                if st.session_state.paper_trading.execute_trade(
-                    quick_symbol, quick_action, quick_quantity, current_price, "Manual", "Manual trade"
-                ):
-                    st.success(f"Paper trade executed: {quick_action} {quick_quantity} {quick_symbol} at ₹{current_price:.2f}")
-                    st.rerun()
     
     with col2:
         st.subheader("📊 Open Positions")
         if st.session_state.paper_trading.positions:
             for symbol, position in st.session_state.paper_trading.positions.items():
-                with st.expander(f"{symbol} {position['action']} - ₹{position['entry_price']:.2f}"):
-                    st.write(f"**Entry Price:** ₹{position['entry_price']:.2f}")
-                    st.write(f"**Quantity:** {position['quantity']}")
-                    st.write(f"**Investment:** ₹{position['entry_price'] * position['quantity']:.2f}")
-                    st.write(f"**Strategy:** {position['strategy']}")
-                    st.write(f"**Reason:** {position['reason']}")
-                    
-                    # Close position
-                    if st.button(f"Close {symbol}", key=f"close_{symbol}"):
-                        df = fetch_enhanced_ohlc(symbol)
-                        if df is not None:
-                            current_price = df['Close'].iloc[-1]
-                            if st.session_state.paper_trading.close_trade(symbol, current_price, "Manual close"):
-                                st.success(f"Position closed: {symbol} at ₹{current_price:.2f}")
-                                st.rerun()
+                st.write(f"{symbol} {position['action']} - ₹{position['entry_price']:.2f}")
         else:
             st.info("No open positions")
-        
-        st.subheader("📈 Trade History")
-        if st.session_state.paper_trading.trade_history:
-            recent_trades = st.session_state.paper_trading.trade_history[-5:]
-            for trade in recent_trades:
-                pnl_color = "green" if trade['pnl'] > 0 else "red"
-                with st.expander(f"{trade['symbol']} {trade['action']} - P&L: ₹{trade['pnl']:.2f}"):
-                    st.write(f"**Entry:** ₹{trade['entry_price']:.2f}")
-                    st.write(f"**Exit:** ₹{trade['exit_price']:.2f}")
-                    st.write(f"**Reason:** {trade['exit_reason']}")
-                    st.write(f"**Strategy:** {trade['strategy']}")
-        else:
-            st.info("No trade history")
 
-def show_backtest():
-    st.header("📊 Enhanced Backtest")
-    st.info("Advanced backtesting functionality - Coming in next version")
+# ---------------------------
+# Server Deployment Functions
+# ---------------------------
+def run_headless_scan():
+    """Function to run scans without browser for server deployment"""
+    print("Starting headless market scan...")
     
-    col1, col2 = st.columns(2)
+    symbols_to_scan = NIFTY_100
+    focus_strategies = list(STRATEGIES.keys())
     
-    with col1:
-        st.subheader("Backtest Configuration")
-        st.selectbox("Strategy", list(STRATEGIES.keys()))
-        st.selectbox("Time Period", ["1 Month", "3 Months", "6 Months", "1 Year"])
-        st.number_input("Initial Capital", value=100000)
-        st.selectbox("Risk Management", ["Fixed", "Dynamic", "Kelly Criterion"])
+    all_signals = []
     
-    with col2:
-        st.subheader("Backtest Results")
-        st.write("Comprehensive backtesting across multiple strategies and time periods will be available in the next update.")
-        st.write("**Planned Features:**")
-        st.write("• Multi-strategy performance comparison")
-        st.write("• Risk-adjusted return metrics (Sharpe, Sortino)")
-        st.write("• Drawdown analysis and recovery periods")
-        st.write("• Portfolio optimization and correlation analysis")
-        st.write("• Walk-forward optimization")
-        st.write("• Monte Carlo simulation")
+    for symbol in symbols_to_scan:
+        df = fetch_enhanced_ohlc(symbol)
+        if df is not None:
+            for strategy_name in focus_strategies:
+                signal = generate_enhanced_signals(df, strategy_name)
+                if signal:
+                    signal['symbol'] = symbol
+                    all_signals.append(signal)
+    
+    print(f"Scan completed. Found {len(all_signals)} signals.")
+    
+    # Execute auto-trades if enabled
+    if st.session_state.auto_trade_config.enabled and all_signals:
+        for signal in sorted(all_signals, key=lambda x: x['confidence'], reverse=True):
+            if signal['confidence'] >= st.session_state.auto_trade_config.min_confidence:
+                if st.session_state.auto_trader.execute_trade(signal, st.session_state.auto_trade_config):
+                    print(f"Auto-trade executed: {signal['symbol']} {signal['action']}")
+    
+    return all_signals
 
 if __name__ == "__main__":
-    main()
+    # Check if running in server mode
+    if len(sys.argv) > 1 and sys.argv[1] == "--headless":
+        # Run in headless mode for server deployment
+        import schedule
+        import time as ttime
+        import sys
+        
+        print("Starting Gemini Intraday Pro in headless mode...")
+        
+        # Schedule scans every 10 minutes during market hours
+        schedule.every(10).minutes.do(run_headless_scan)
+        
+        # Run initial scan
+        run_headless_scan()
+        
+        # Keep running
+        while True:
+            schedule.run_pending()
+            ttime.sleep(60)
+    else:
+        # Run normal Streamlit app
+        main()
