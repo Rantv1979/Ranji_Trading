@@ -1,11 +1,6 @@
 # gemini_intraday_final_all_symbols.py
-# Final: Intraday terminal with signals from Nifty 50 / Nifty Next 50 / Nifty 100 / Nifty 500,
+# Final corrected: Intraday terminal with signals from Nifty 50 / Nifty Next 50 / Nifty 100 / Nifty 500,
 # separate Backtest tab, and Live Chart for selected signal (auto-refresh 10s).
-#
-# Notes:
-# - At runtime the app will attempt to fetch the NIFTY 500 constituents from Yahoo Finance.
-#   If that fails it falls back to bundled NIFTY 100 symbols.
-# - Requires: streamlit, yfinance, pandas, numpy, requests, beautifulsoup4, plotly, streamlit-autorefresh
 #
 # Run:
 #    streamlit run gemini_intraday_final_all_symbols.py
@@ -32,40 +27,33 @@ st.set_page_config(layout="wide", page_title="Gemini Intraday Pro — All Symbol
 # ---------------------------
 @st.cache_data(ttl=60*60)  # cache 1 hour
 def fetch_nifty500_list():
-    """Try to scrape Yahoo Finance NIFTY 500 components page for tickers (.NS).
-    If scraping fails, return None to allow fallback."""
     try:
-        url = "https://finance.yahoo.com/quote/%5ECRSLDX/components/"  # Yahoo NIFTY 500 components
+        url = "https://finance.yahoo.com/quote/%5ECRSLDX/components/"
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, headers=headers, timeout=15)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
-        # Yahoo renders component table rows with 'data-test' attributes; find tickers in table
         tickers = set()
-        # Find table rows and extract first <a> or text that is ticker
         table = soup.find("table")
         if table:
             for row in table.find_all("tr"):
                 cells = row.find_all("td")
                 if len(cells) >= 1:
                     txt = cells[0].get_text(strip=True)
-                    # Sometimes tickers are like "RELIANCE.NS" or "RELIANCE.NS (Reliance Ind...)"
-                    # Only keep if looks like .NS or uppercase letters/digits.
-                    if txt:
-                        # normalize
-                        t = txt.split()[0]
-                        if t.endswith(".NS") or t.isupper():
-                            tickers.add(t if t.endswith(".NS") else f"{t}.NS")
-        # Fallback: attempt to extract from JSON LD or scripts (less reliable)
+                    if not txt:
+                        continue
+                    t = txt.split()[0]
+                    if t.endswith(".NS"):
+                        tickers.add(t)
+                    elif t.isupper():
+                        tickers.add(f"{t}.NS")
         if not tickers:
-            # search for "components" in scripts
             scripts = soup.find_all("script")
             for s in scripts:
                 txt = s.string
                 if not txt:
                     continue
-                if "components" in txt and ".NS" in txt:
-                    # crude extraction
+                if ".NS" in txt:
                     for token in txt.split('"'):
                         if token.endswith(".NS"):
                             tickers.add(token)
@@ -86,23 +74,20 @@ NIFTY_50 = [
     "GRASIM.NS","DLF.NS","ADANIPORTS.NS","EICHERMOT.NS","CIPLA.NS",
     "IOC.NS","JSWSTEEL.NS","SBILIFE.NS","TATASTEEL.NS","INDUSINDBK.NS",
     "HINDALCO.NS","NESTLEIND.NS","DRREDDY.NS","BAJAJ-AUTO.NS","SHREECEM.NS",
-    "TATAELXSI.NS","MRF.NS","PIDILITIND.NS","BAJAJFINSV.NS","ULTRACEMCO.NS"  # duplicates trimmed later
+    "TATAELXSI.NS","MRF.NS","PIDILITIND.NS","BAJAJFINSV.NS"
 ]
 NIFTY_NEXT_50 = [
     "ADANITRANS.NS","APOLLOHOSP.NS","ADANIGREEN.NS","AUROPHARMA.NS","BERGEPAINT.NS",
-    "BOSCHLTD.NS","CASTROLIND.NS","INDIGO.NS","GODREJCP.NS","GRSE.NS",
-    "HAVELLS.NS","HEROMOTOCO.NS","HINDZINC.NS","ICICIPRULI.NS","INDIAMART.NS",
-    "LICHSGFIN.NS","LUPIN.NS","MUTHOOTFIN.NS","PEL.NS","PEL.NS"
+    "BOSCHLTD.NS","CASTROLIND.NS","INDIGO.NS","GODREJCP.NS","HAVELLS.NS",
+    "HEROMOTOCO.NS","HINDZINC.NS","ICICIPRULI.NS","INDIAMART.NS","LICHSGFIN.NS",
+    "LUPIN.NS","MUTHOOTFIN.NS","PEL.NS"
 ]
-
-# We'll form NIFTY_100 as union of above
 NIFTY_100 = sorted(list(set(NIFTY_50 + NIFTY_NEXT_50)))
 
 # ---------------------------
 # Utility: indicator calculations
 # ---------------------------
 def compute_indicators(df: pd.DataFrame):
-    """Add SMA20, SMA50, Bollinger bands, RSI, and Volume MA to df."""
     if df is None or df.empty:
         return df
     df = df.copy()
@@ -112,13 +97,11 @@ def compute_indicators(df: pd.DataFrame):
     df['BB_STD'] = df['Close'].rolling(window=20, min_periods=1).std().fillna(0)
     df['BB_UP'] = df['BB_MID'] + 2 * df['BB_STD']
     df['BB_LO'] = df['BB_MID'] - 2 * df['BB_STD']
-    # RSI
     delta = df['Close'].diff()
     gain = delta.where(delta > 0, 0).rolling(window=14, min_periods=1).mean()
     loss = -delta.where(delta < 0, 0).rolling(window=14, min_periods=1).mean()
     rs = gain / loss.replace(0, np.nan)
     df['RSI'] = 100 - (100 / (1 + rs.fillna(0)))
-    # Volume MA
     if 'Volume' in df.columns:
         df['VOL_MA_20'] = df['Volume'].rolling(window=20, min_periods=1).mean()
     else:
@@ -131,7 +114,6 @@ def compute_indicators(df: pd.DataFrame):
 # ---------------------------
 @st.cache_data(ttl=30)
 def fetch_ohlc(symbol: str, period="1d", interval="5m"):
-    """Fetch OHLCV from yfinance and compute indicators."""
     try:
         df = yf.download(symbol, period=period, interval=interval, progress=False, threads=False)
         if df is None or df.empty:
@@ -143,38 +125,69 @@ def fetch_ohlc(symbol: str, period="1d", interval="5m"):
         return None
 
 # ---------------------------
-# Signal generation per symbol (enhanced confirmation)
+# Signal generation per dataframe (safe scalar extraction)
 # ---------------------------
+def _safe_scalar_from_row(row, key, default=np.nan):
+    """Return a safe scalar float for row[key] (Series row), handling Series / NaN."""
+    try:
+        val = row.get(key, default)
+        # If val is a pandas Series/array-like, reduce to the last item
+        if isinstance(val, (pd.Series, np.ndarray, list)):
+            if len(val) == 0:
+                return default
+            # pick last scalar
+            v = val[-1]
+            return float(v) if v is not None and not (isinstance(v, float) and np.isnan(v)) else default
+        # Ordinary scalar
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return default
+        return float(val)
+    except Exception:
+        return default
+
 def generate_signals_for_df(df):
-    """Return latest signal (if any) for a dataframe. Uses SMA crossover + RSI + Volume filter."""
+    """Return latest signal (if any) for a dataframe using safe scalar operations."""
     if df is None or df.empty or len(df) < 3:
         return None
     latest = df.iloc[-1]
     prev = df.iloc[-2]
-    # Volume confirmation: latest volume > 20MA
-    vol_ok = latest['Volume'] > latest.get('VOL_MA_20', 0)
-    # RSI zones
-    rsi = latest.get('RSI', np.nan)
-    # SMA crossover
+    vol_latest = _safe_scalar_from_row(latest, 'Volume', default=0.0)
+    vol_ma = _safe_scalar_from_row(latest, 'VOL_MA_20', default=0.0)
+    rsi = _safe_scalar_from_row(latest, 'RSI', default=np.nan)
+    sma20_latest = _safe_scalar_from_row(latest, 'SMA_20', default=np.nan)
+    sma50_latest = _safe_scalar_from_row(latest, 'SMA_50', default=np.nan)
+    sma20_prev = _safe_scalar_from_row(prev, 'SMA_20', default=np.nan)
+    sma50_prev = _safe_scalar_from_row(prev, 'SMA_50', default=np.nan)
+    bb_lo = _safe_scalar_from_row(latest, 'BB_LO', default=np.nan)
+    bb_up = _safe_scalar_from_row(latest, 'BB_UP', default=np.nan)
+
+    vol_ok = (vol_latest > vol_ma) if not (math.isnan(vol_latest) or math.isnan(vol_ma)) else False
+
     try:
-        if latest['SMA_20'] > latest['SMA_50'] and prev['SMA_20'] <= prev['SMA_50'] and (rsi > 55) and vol_ok:
-            # BUY signal
-            entry = latest['Close']
-            sl = latest['BB_LO'] if not math.isnan(latest['BB_LO']) else entry * 0.99
+        # BUY condition
+        if (not math.isnan(sma20_latest) and not math.isnan(sma50_latest) and
+            not math.isnan(sma20_prev) and not math.isnan(sma50_prev) and
+            sma20_latest > sma50_latest and sma20_prev <= sma50_prev and
+            (not math.isnan(rsi) and rsi > 55) and vol_ok):
+            entry = _safe_scalar_from_row(latest, 'Close', default=np.nan)
+            sl = bb_lo if not math.isnan(bb_lo) else entry * 0.99
             t1 = entry * 1.015
             t2 = entry * 1.03
-            confidence = min(0.98, (rsi / 100.0))
+            confidence = min(0.98, (rsi / 100.0)) if not math.isnan(rsi) else 0.6
             return {
                 'id': str(uuid.uuid4()), 'timestamp': df.index[-1].to_pydatetime(), 'symbol': None,
                 'action': 'BUY', 'entry': entry, 'stop_loss': sl, 'target1': t1, 'target2': t2, 'confidence': confidence
             }
-        elif latest['SMA_20'] < latest['SMA_50'] and prev['SMA_20'] >= prev['SMA_50'] and (rsi < 45) and vol_ok:
-            # SELL signal
-            entry = latest['Close']
-            sl = latest['BB_UP'] if not math.isnan(latest['BB_UP']) else entry * 1.01
+        # SELL condition
+        if (not math.isnan(sma20_latest) and not math.isnan(sma50_latest) and
+            not math.isnan(sma20_prev) and not math.isnan(sma50_prev) and
+            sma20_latest < sma50_latest and sma20_prev >= sma50_prev and
+            (not math.isnan(rsi) and rsi < 45) and vol_ok):
+            entry = _safe_scalar_from_row(latest, 'Close', default=np.nan)
+            sl = bb_up if not math.isnan(bb_up) else entry * 1.01
             t1 = entry * 0.985
             t2 = entry * 0.97
-            confidence = min(0.98, ((100 - rsi) / 100.0))
+            confidence = min(0.98, ((100 - rsi) / 100.0)) if not math.isnan(rsi) else 0.6
             return {
                 'id': str(uuid.uuid4()), 'timestamp': df.index[-1].to_pydatetime(), 'symbol': None,
                 'action': 'SELL', 'entry': entry, 'stop_loss': sl, 'target1': t1, 'target2': t2, 'confidence': confidence
@@ -184,7 +197,7 @@ def generate_signals_for_df(df):
     return None
 
 # ---------------------------
-# Generate signals across a list of symbols (may take time)
+# Generate signals across a list of symbols (with safe handling)
 # ---------------------------
 def generate_signals_for_symbols(symbols, period="1d", interval="5m", progress_callback=None):
     signals = []
@@ -202,8 +215,6 @@ def generate_signals_for_symbols(symbols, period="1d", interval="5m", progress_c
 # Backtest logic (separate tab)
 # ---------------------------
 def backtest_on_symbol(symbol, period="30d", qty=100, capital=100000):
-    """Backtest enhanced strategy on a single symbol over period.
-    Uses SMA crossover + RSI + Volume confirmations, targets 1.5% and stop 1%."""
     df = fetch_ohlc(symbol, period=period, interval="5m")
     if df is None or df.empty:
         return None
@@ -213,29 +224,40 @@ def backtest_on_symbol(symbol, period="30d", qty=100, capital=100000):
     wins = 0
     losses = 0
 
-    # Iterate through df and check signals using earlier enhanced rule
     for i in range(51, len(df)-1):
         row = df.iloc[i]
         prev = df.iloc[i-1]
-        vol_ok = row['Volume'] > row.get('VOL_MA_20', 0)
-        rsi = row.get('RSI', np.nan)
-        if row['SMA_20'] > row['SMA_50'] and prev['SMA_20'] <= prev['SMA_50'] and (rsi > 55) and vol_ok:
+        vol_row = _safe_scalar_from_row(row, 'Volume', default=0.0)
+        vol_ma_row = _safe_scalar_from_row(row, 'VOL_MA_20', default=0.0)
+        vol_ok = (vol_row > vol_ma_row) if not (math.isnan(vol_row) or math.isnan(vol_ma_row)) else False
+        rsi = _safe_scalar_from_row(row, 'RSI', default=np.nan)
+        sma20 = _safe_scalar_from_row(row, 'SMA_20', default=np.nan)
+        sma50 = _safe_scalar_from_row(row, 'SMA_50', default=np.nan)
+        sma20_prev = _safe_scalar_from_row(prev, 'SMA_20', default=np.nan)
+        sma50_prev = _safe_scalar_from_row(prev, 'SMA_50', default=np.nan)
+        bb_lo = _safe_scalar_from_row(row, 'BB_LO', default=np.nan)
+        bb_up = _safe_scalar_from_row(row, 'BB_UP', default=np.nan)
+
+        if (not math.isnan(sma20) and not math.isnan(sma50) and not math.isnan(sma20_prev) and not math.isnan(sma50_prev)
+            and sma20 > sma50 and sma20_prev <= sma50_prev and (not math.isnan(rsi) and rsi > 55) and vol_ok):
             action = 'BUY'
-            entry = row['Close']
-            sl = row['BB_LO'] if not math.isnan(row['BB_LO']) else entry * 0.99
+            entry = _safe_scalar_from_row(row, 'Close', default=np.nan)
+            sl = bb_lo if not math.isnan(bb_lo) else entry * 0.99
             tgt = entry * 1.015
-        elif row['SMA_20'] < row['SMA_50'] and prev['SMA_20'] >= prev['SMA_50'] and (rsi < 45) and vol_ok:
+        elif (not math.isnan(sma20) and not math.isnan(sma50) and not math.isnan(sma20_prev) and not math.isnan(sma50_prev)
+            and sma20 < sma50 and sma20_prev >= sma50_prev and (not math.isnan(rsi) and rsi < 45) and vol_ok):
             action = 'SELL'
-            entry = row['Close']
-            sl = row['BB_UP'] if not math.isnan(row['BB_UP']) else entry * 1.01
+            entry = _safe_scalar_from_row(row, 'Close', default=np.nan)
+            sl = bb_up if not math.isnan(bb_up) else entry * 1.01
             tgt = entry * 0.985
         else:
             continue
 
-        # Look forward for exit (same session)
         exit_price = None
         for j in range(i+1, len(df)):
-            p = df.iloc[j]['Close']
+            p = _safe_scalar_from_row(df.iloc[j], 'Close', default=np.nan)
+            if math.isnan(p):
+                continue
             if action == 'BUY':
                 if p <= sl:
                     exit_price = sl
@@ -251,8 +273,7 @@ def backtest_on_symbol(symbol, period="30d", qty=100, capital=100000):
                     exit_price = tgt
                     break
         if exit_price is None:
-            # exit at last candle close of dataset
-            exit_price = df.iloc[-1]['Close']
+            exit_price = _safe_scalar_from_row(df.iloc[-1], 'Close', default=np.nan)
 
         pnl = (exit_price - entry) * qty if action == 'BUY' else (entry - exit_price) * qty
         balance += pnl
@@ -263,12 +284,11 @@ def backtest_on_symbol(symbol, period="30d", qty=100, capital=100000):
         else:
             losses += 1
 
-    # Stats
     total = len(trades)
     win_rate = (wins / total * 100) if total > 0 else 0.0
     gross_profit = sum(t['pnl'] for t in trades if t['pnl'] > 0)
     gross_loss = -sum(t['pnl'] for t in trades if t['pnl'] < 0)
-    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float('inf') if gross_profit>0 else 0.0
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0.0)
 
     stats = {
         'symbol': symbol,
@@ -279,7 +299,7 @@ def backtest_on_symbol(symbol, period="30d", qty=100, capital=100000):
         'win_rate_pct': round(win_rate, 2),
         'net_pnl': round(balance - capital, 2),
         'final_balance': round(balance, 2),
-        'profit_factor': round(profit_factor, 2) if profit_factor != float('inf') else np.nan
+        'profit_factor': round(profit_factor, 2) if profit_factor not in (float('inf'), np.nan) else np.nan
     }
     return stats, trades, equity_curve
 
@@ -288,7 +308,8 @@ def backtest_on_symbol(symbol, period="30d", qty=100, capital=100000):
 # ---------------------------
 def plot_candles(df, symbol, height=520):
     fig = go.Figure()
-    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'))
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'],
+                                 low=df['Low'], close=df['Close'], name='Price'))
     if 'SMA_20' in df:
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', mode='lines'))
     if 'SMA_50' in df:
@@ -305,7 +326,6 @@ def plot_candles(df, symbol, height=520):
 
 st.title("📈 Gemini Intraday Pro — All Symbols (Nifty 50/Next50/100/500)")
 
-# Try to fetch Nifty 500 list (cached)
 with st.spinner("Loading NIFTY 500 constituents (if available)..."):
     nifty500 = fetch_nifty500_list()
 
@@ -313,17 +333,14 @@ if nifty500 and len(nifty500) >= 400:
     st.success(f"Loaded NIFTY 500 list ({len(nifty500)} tickers).")
 else:
     if nifty500 is None:
-        st.warning("Could not fetch full NIFTY 500 list automatically — falling back to NIFTY 100 sample list. You can place a local 'nifty500.txt' (one ticker per line) in the app folder to override.")
+        st.warning("Could not fetch full NIFTY 500 list automatically — falling back to NIFTY 100 sample list.")
     else:
         st.info(f"Fetched {len(nifty500)} tickers (partial). Using what was retrieved.")
     nifty500 = None
 
-# If local override file exists, try to load it
+# Try local override file
 try:
     local_file = "nifty500.txt"
-    if st.experimental_get_query_params().get("use_local_nifty500"):
-        # user opted query param to force
-        pass
     try:
         with open(local_file, "r") as f:
             lines = [l.strip() for l in f.readlines() if l.strip()]
@@ -335,10 +352,10 @@ try:
 except Exception:
     pass
 
-# Build final symbol universe
+# Build universe
 universe = sorted(set(NIFTY_100 + (nifty500 if nifty500 else [])))
 if not universe:
-    universe = NIFTY_100  # ultimate fallback
+    universe = NIFTY_100
 
 # Sidebar controls
 st.sidebar.header("Controls")
@@ -350,14 +367,12 @@ symbols_to_scan = st.sidebar.multiselect("Symbols to scan (empty = full universe
 if not symbols_to_scan:
     symbols_to_scan = universe
 
-# AUTORELOAD engine
 if auto_refresh:
     st_autorefresh(interval=engine_interval * 1000, key="engine_refresher")
 
-# Tabs: Dashboard / Signals / Live Chart / Backtest / Trade Log
 tabs = st.tabs(["Dashboard", "Signals", "Live Chart (Signal)", "Backtest", "Trade Log"])
 
-# --- Dashboard tab: quick stats and top signals ---
+# --- Dashboard tab ---
 with tabs[0]:
     st.header("Dashboard — Quick Scan")
     st.write(f"Universe: {len(universe)} symbols. Scanning: {len(symbols_to_scan)} symbols.")
@@ -366,7 +381,7 @@ with tabs[0]:
         st.metric("Last refresh", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         st.metric("Symbols scanned", len(symbols_to_scan))
     with col2:
-        st.info("Generating signals across the selected universe (this may take a while for NIFTY 500).")
+        st.info("Generating signals across the selected universe (this may take a while for large universes).")
         progress_text = st.empty()
         prog_bar = st.progress(0)
         signals = []
@@ -392,30 +407,25 @@ with tabs[0]:
         else:
             st.info("No signals generated on this scan.")
 
-# --- Signals tab: full signals list + ability to view details / place paper trades ---
+# --- Signals tab ---
 with tabs[1]:
     st.header("Signals — Full Universe")
     st.write("Signals are generated using SMA20/50 crossover with RSI (>55 buy, <45 sell) and volume confirmation (volume > 20MA).")
-    # Option to refresh signals
     if refresh_now:
         st.experimental_rerun()
-    # Re-use signals variable if present else generate
     try:
-        signals  # from previous tab
+        signals
     except NameError:
-        # generate quickly (no progress UI)
         signals = generate_signals_for_symbols(symbols_to_scan, period="1d", interval="5m")
     st.write(f"Total signals: {len(signals)}")
     if signals:
-        # Show as expandable list
-        for s in sorted(signals, key=lambda x: x['confidence'], reverse=True):
-            with st.expander(f"{s['symbol']} — {s['action']} — Conf {s['confidence']:.2f} — Entry {s['entry']:.2f}"):
+        for s in sorted(signals, key=lambda x: x.get('confidence',0), reverse=True):
+            with st.expander(f"{s['symbol']} — {s['action']} — Conf {s.get('confidence',0):.2f} — Entry {s.get('entry',0):.2f}"):
                 st.write(f"Time: {s['timestamp']}")
                 st.write(f"Entry: ₹{s['entry']:.2f} | SL: ₹{s['stop_loss']:.2f} | T1: ₹{s['target1']:.2f} | T2: ₹{s['target2']:.2f}")
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     if st.button(f"Place Paper Order {s['symbol']}", key=f"paper_{s['id']}"):
-                        # store paper trade in session state
                         if 'paper_trades' not in st.session_state:
                             st.session_state.paper_trades = []
                         st.session_state.paper_trades.insert(0, {
@@ -426,9 +436,7 @@ with tabs[1]:
                         st.success("Paper order placed.")
                 with c2:
                     if st.button(f"View Live Chart {s['symbol']}", key=f"chart_{s['id']}"):
-                        # set selected signal for live chart tab via session_state
                         st.session_state.selected_signal = s
-                        # navigate to Live Chart tab by re-render (can't programmatically switch tabs)
                         st.experimental_rerun()
                 with c3:
                     st.write("")
@@ -436,25 +444,22 @@ with tabs[1]:
 # --- Live Chart (Signal-specific) tab ---
 with tabs[2]:
     st.header("Live Chart for Selected Signal")
-    # pick signal from session_state or choose symbol manually
     sel_signal = st.session_state.get('selected_signal', None)
     if sel_signal:
         st.subheader(f"{sel_signal['symbol']} — {sel_signal['action']} (signal time {sel_signal['timestamp']})")
         chart_sym = sel_signal['symbol']
     else:
         chart_sym = st.selectbox("Select symbol to view live chart", options=symbols_to_scan, index=0)
-    # set autorefresh for chart at live_chart_refresh seconds
     st_autorefresh(interval=live_chart_refresh * 1000, key=f"live_chart_{chart_sym}")
     df_chart = fetch_ohlc(chart_sym, period="1d", interval="5m")
     if df_chart is None or df_chart.empty:
         st.warning(f"No chart data for {chart_sym}")
     else:
         plot_candles(df_chart, chart_sym)
-        # If there is an active signal for this symbol, overlay markers
         if sel_signal and sel_signal['symbol'] == chart_sym:
             st.markdown(f"**Signal** — {sel_signal['action']} @ ₹{sel_signal['entry']:.2f}  |  SL: ₹{sel_signal['stop_loss']:.2f}  |  T1: ₹{sel_signal['target1']:.2f}")
 
-# --- Backtest tab (separate) ---
+# --- Backtest tab ---
 with tabs[3]:
     st.header("Backtest — Enhanced Strategy (SMA20/50 + RSI + Volume)")
     st.write("Backtest runs per-symbol over historical 5m bars. Select symbol and period.")
@@ -478,8 +483,7 @@ with tabs[3]:
                     import matplotlib.pyplot as plt
                     fig, ax = plt.subplots(figsize=(8,3))
                     ax.plot(eq, linewidth=2)
-                    ax.set_xlabel("Trade #")
-                    ax.set_ylabel("Equity (₹)")
+                    ax.set_xlabel("Trade #"); ax.set_ylabel("Equity (₹)")
                     st.pyplot(fig)
                     if trades:
                         st.subheader("Trades (most recent first)")
@@ -504,9 +508,6 @@ with tabs[4]:
             st.session_state.paper_trades = []
             st.success("Cleared paper trades.")
 
-# ---------------------------
 # Footer
-# ---------------------------
 st.markdown("---")
-st.caption("Strategy: SMA20/50 crossover with RSI + Volume confirmations. SL uses Bollinger band. Targets: ~1.5% / 3%. "
-           "Backtest is illustrative — please validate with your own data and slippage assumptions before using for live trading.")
+st.caption("Strategy: SMA20/50 crossover with RSI + Volume confirmations. SL uses Bollinger band. Targets: ~1.5 / 3%. Backtest is illustrative — validate with slippage before live trading.")
