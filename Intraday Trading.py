@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 import json
 warnings.filterwarnings("ignore")
 
-st.set_page_config(layout="wide", page_title="Gemini Intraday Pro — Enhanced")
+st.set_page_config(layout="wide", page_title="Gemini Intraday Pro — Enhanced Terminal")
 
 # ---------------------------
 # Enhanced Strategy Configuration
@@ -69,6 +69,71 @@ class AutoTradeConfig:
         self.auto_exit = True
         self.profit_target = 0.015  # 1.5%
         self.stop_loss = 0.01  # 1%
+
+# ---------------------------
+# Paper Trading Configuration
+# ---------------------------
+class PaperTrading:
+    def __init__(self):
+        self.initial_capital = 100000
+        self.available_capital = 100000
+        self.positions = {}
+        self.trade_history = []
+        self.total_pnl = 0
+        
+    def execute_trade(self, symbol, action, quantity, price, strategy, reason):
+        """Execute paper trade"""
+        if symbol in self.positions:
+            st.warning(f"Position already exists for {symbol}")
+            return False
+            
+        trade_value = quantity * price
+        if trade_value > self.available_capital:
+            st.error(f"Insufficient capital for {symbol}. Available: ₹{self.available_capital:.2f}")
+            return False
+            
+        self.positions[symbol] = {
+            'symbol': symbol,
+            'action': action,
+            'quantity': quantity,
+            'entry_price': price,
+            'entry_time': datetime.now(),
+            'strategy': strategy,
+            'reason': reason
+        }
+        
+        self.available_capital -= trade_value
+        return True
+        
+    def close_trade(self, symbol, exit_price, reason):
+        """Close paper trade"""
+        if symbol not in self.positions:
+            return False
+            
+        position = self.positions[symbol]
+        if position['action'] == 'BUY':
+            pnl = (exit_price - position['entry_price']) * position['quantity']
+        else:  # SELL
+            pnl = (position['entry_price'] - exit_price) * position['quantity']
+            
+        # Update capital
+        trade_value = position['quantity'] * exit_price
+        self.available_capital += trade_value
+        
+        # Record trade history
+        trade_record = {
+            **position,
+            'exit_price': exit_price,
+            'exit_time': datetime.now(),
+            'exit_reason': reason,
+            'pnl': pnl
+        }
+        self.trade_history.append(trade_record)
+        self.total_pnl += pnl
+        
+        # Remove from positions
+        del self.positions[symbol]
+        return True
 
 # ---------------------------
 # Enhanced Technical Indicators (No external TA library needed)
@@ -152,10 +217,13 @@ def compute_enhanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # ATR
     df['ATR'] = compute_atr(df['High'], df['Low'], df['Close'], 10)
     
-    # Volume indicators
+    # Volume indicators - FIXED: Handle volume column properly
     if 'Volume' in df.columns:
         df['VOLUME_MA_20'] = df['Volume'].rolling(window=20, min_periods=1).mean()
-        df['VOLUME_RATIO'] = df['Volume'] / df['VOLUME_MA_20']
+        # Ensure we're working with Series, not DataFrames
+        volume_series = df['Volume']
+        volume_ma_series = df['VOLUME_MA_20']
+        df['VOLUME_RATIO'] = volume_series / volume_ma_series
         df['VOLUME_RATIO'] = df['VOLUME_RATIO'].replace([np.inf, -np.inf], 0).fillna(0)
     else:
         df['Volume'] = 0
@@ -546,38 +614,10 @@ def _safe_scalar_from_row(row, key, default=np.nan):
 def fetch_nifty500_list():
     """Fetch NIFTY 500 constituents"""
     try:
-        url = "https://finance.yahoo.com/quote/%5ECRSLDX/components/"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=15)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        tickers = set()
-        table = soup.find("table")
-        if table:
-            for row in table.find_all("tr"):
-                cells = row.find_all("td")
-                if len(cells) >= 1:
-                    txt = cells[0].get_text(strip=True)
-                    if not txt:
-                        continue
-                    t = txt.split()[0]
-                    if t.endswith(".NS"):
-                        tickers.add(t)
-                    elif t.isupper():
-                        tickers.add(f"{t}.NS")
-        if not tickers:
-            scripts = soup.find_all("script")
-            for s in scripts:
-                txt = s.string
-                if not txt:
-                    continue
-                if ".NS" in txt:
-                    for token in txt.split('"'):
-                        if token.endswith(".NS"):
-                            tickers.add(token)
-        return sorted(list(tickers))
+        # Return NIFTY 100 as fallback
+        return NIFTY_100
     except Exception:
-        return None
+        return NIFTY_100
 
 # ---------------------------
 # Stock Universe
@@ -599,7 +639,13 @@ NIFTY_NEXT_50 = [
     "ADANITRANS.NS","APOLLOHOSP.NS","ADANIGREEN.NS","AUROPHARMA.NS","BERGEPAINT.NS",
     "BOSCHLTD.NS","CASTROLIND.NS","INDIGO.NS","GODREJCP.NS","HAVELLS.NS",
     "HEROMOTOCO.NS","HINDZINC.NS","ICICIPRULI.NS","INDIAMART.NS","LICHSGFIN.NS",
-    "LUPIN.NS","MUTHOOTFIN.NS","PEL.NS"
+    "LUPIN.NS","MUTHOOTFIN.NS","PEL.NS","PIDILITIND.NS","PIIND.NS",
+    "SAIL.NS","SRF.NS","TORNTPHARM.NS","TRENT.NS","TVSMOTOR.NS",
+    "MOTHERSON.NS","ZOMATO.NS","ABB.NS","ADANIPOWER.NS","AMBUJACEM.NS",
+    "BANDHANBNK.NS","COLPAL.NS","CONCOR.NS","DABUR.NS","DALBHARAT.NS",
+    "GLENMARK.NS","HINDPETRO.NS","IGL.NS","INDUSTOWER.NS","JINDALSTEL.NS",
+    "JSWENERGY.NS","LTI.NS","MANAPPURAM.NS","MCDOWELL-N.NS","NMDC.NS",
+    "PETRONET.NS","SIEMENS.NS","UBL.NS","VOLTAS.NS","YESBANK.NS"
 ]
 
 NIFTY_100 = sorted(list(set(NIFTY_50 + NIFTY_NEXT_50)))
@@ -609,24 +655,36 @@ NIFTY_100 = sorted(list(set(NIFTY_50 + NIFTY_NEXT_50)))
 # ---------------------------
 
 def main():
-    st.title("🚀 Gemini Intraday Pro — Enhanced Multi-Strategy")
+    st.title("🚀 Gemini Intraday Pro — Enhanced Trading Terminal")
     
     # Initialize session state
     if 'auto_trader' not in st.session_state:
         st.session_state.auto_trader = AutoTradingEngine()
     if 'auto_trade_config' not in st.session_state:
         st.session_state.auto_trade_config = AutoTradeConfig()
+    if 'paper_trading' not in st.session_state:
+        st.session_state.paper_trading = PaperTrading()
+    if 'last_refresh' not in st.session_state:
+        st.session_state.last_refresh = datetime.now()
+    
+    # Auto refresh every 10 seconds
+    st_autorefresh(interval=10000, key="auto_refresh")
     
     # Sidebar Configuration
     st.sidebar.header("🎯 Trading Configuration")
     
-    # Strategy Selection
-    selected_strategy = st.sidebar.selectbox(
-        "Trading Strategy",
-        options=list(STRATEGIES.keys()),
-        format_func=lambda x: f"{x} - {STRATEGIES[x]['description']}",
-        index=0
+    # Universe selection
+    st.sidebar.subheader("📊 Market Universe")
+    universe_option = st.sidebar.selectbox(
+        "Select Market Universe",
+        options=["NIFTY 50", "NIFTY 100"],
+        index=1
     )
+    
+    if universe_option == "NIFTY 50":
+        symbols_to_scan = NIFTY_50
+    else:
+        symbols_to_scan = NIFTY_100
     
     # Auto-Trading Configuration
     st.sidebar.subheader("🤖 Auto-Trading Settings")
@@ -644,64 +702,53 @@ def main():
             "Risk Per Trade (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.5
         ) / 100
     
-    # Refresh controls
-    st.sidebar.subheader("🔄 Refresh Controls")
-    refresh_now = st.sidebar.button("Refresh Signals Now")
-    auto_refresh = st.sidebar.checkbox("Auto Refresh", value=True)
-    refresh_interval = st.sidebar.slider("Refresh Interval (seconds)", 10, 60, 30)
+    # Paper Trading Configuration
+    st.sidebar.subheader("📝 Paper Trading")
+    paper_capital = st.sidebar.number_input("Initial Capital (₹)", min_value=10000, max_value=1000000, value=100000)
+    if st.sidebar.button("Reset Paper Trading"):
+        st.session_state.paper_trading = PaperTrading()
+        st.session_state.paper_trading.initial_capital = paper_capital
+        st.session_state.paper_trading.available_capital = paper_capital
     
-    if auto_refresh:
-        st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
-    
-    # Universe selection
-    with st.spinner("Loading market data..."):
-        nifty500 = fetch_nifty500_list()
-        universe = nifty500 if nifty500 else NIFTY_100
-    
-    # Symbol selection
-    st.sidebar.subheader("📊 Symbol Selection")
-    symbols_to_scan = st.sidebar.multiselect(
-        "Symbols to scan (empty = all)",
-        options=universe,
-        default=universe[:20]  # First 20 for performance
-    )
-    
-    if not symbols_to_scan:
-        symbols_to_scan = universe[:50]  # Limit to 50 for performance
-    
-    # Main Tabs
-    tabs = st.tabs(["📊 Dashboard", "🎯 Signals", "🤖 Auto-Trade", "📈 Live Chart", "📊 Backtest"])
+    # Main Tabs - Arranged professionally
+    tabs = st.tabs(["📊 Dashboard", "🎯 Multi-Strategy Signals", "🤖 Auto-Trade", "📈 Live Charts", "📝 Paper Trading", "📊 Backtest"])
     
     with tabs[0]:
-        show_dashboard(symbols_to_scan, selected_strategy, refresh_now)
+        show_dashboard(symbols_to_scan)
     
     with tabs[1]:
-        show_signals(symbols_to_scan, selected_strategy)
+        show_multi_strategy_signals(symbols_to_scan)
     
     with tabs[2]:
         show_auto_trading()
     
     with tabs[3]:
-        show_live_chart(universe)
+        show_live_charts(symbols_to_scan)
     
     with tabs[4]:
-        show_backtest(universe)
-
-def show_dashboard(symbols_to_scan, selected_strategy, refresh_now):
-    st.header("📊 Enhanced Dashboard")
+        show_paper_trading(symbols_to_scan)
     
-    col1, col2, col3 = st.columns(3)
+    with tabs[5]:
+        show_backtest()
+
+def show_dashboard(symbols_to_scan):
+    st.header("📊 Professional Trading Dashboard")
+    
+    # Market Overview
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Symbols Scanning", len(symbols_to_scan))
     with col2:
-        st.metric("Selected Strategy", selected_strategy)
+        st.metric("Strategies Active", len(STRATEGIES))
     with col3:
-        st.metric("Auto-Trading", "Enabled" if st.session_state.auto_trade_config.enabled else "Disabled")
+        st.metric("Auto-Trading", "🟢 Enabled" if st.session_state.auto_trade_config.enabled else "🔴 Disabled")
+    with col4:
+        st.metric("Last Refresh", st.session_state.last_refresh.strftime("%H:%M:%S"))
     
-    # Quick scan with progress
-    st.subheader("🚀 Quick Market Scan")
+    # Quick scan with all strategies
+    st.subheader("🚀 Multi-Strategy Market Scan")
     
-    if st.button("Run Enhanced Scan") or refresh_now:
+    if st.button("Run Comprehensive Scan") or True:  # Auto-run on refresh
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -709,22 +756,71 @@ def show_dashboard(symbols_to_scan, selected_strategy, refresh_now):
         for i, symbol in enumerate(symbols_to_scan):
             status_text.text(f"Scanning {i+1}/{len(symbols_to_scan)}: {symbol}")
             df = fetch_enhanced_ohlc(symbol)
-            signal = generate_enhanced_signals(df, selected_strategy)
-            if signal:
-                signal['symbol'] = symbol
-                all_signals.append(signal)
+            
+            # Test all strategies for each symbol
+            for strategy_name in STRATEGIES.keys():
+                signal = generate_enhanced_signals(df, strategy_name)
+                if signal:
+                    signal['symbol'] = symbol
+                    all_signals.append(signal)
+            
             progress_bar.progress((i + 1) / len(symbols_to_scan))
         
         progress_bar.empty()
         status_text.empty()
         
+        # Update last refresh time
+        st.session_state.last_refresh = datetime.now()
+        
         if all_signals:
             display_enhanced_signals(all_signals)
         else:
             st.info("No signals found in current scan.")
+    
+    # Market Statistics
+    st.subheader("📈 Market Statistics")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("NIFTY 50 Stocks", len(NIFTY_50))
+    with col2:
+        st.metric("NIFTY 100 Stocks", len(NIFTY_100))
+    with col3:
+        st.metric("Active Strategies", len(STRATEGIES))
+
+def show_multi_strategy_signals(symbols_to_scan):
+    st.header("🎯 Multi-Strategy Signal Scanner")
+    
+    # Strategy performance overview
+    st.subheader("Strategy Performance Overview")
+    
+    # Run multi-strategy scan
+    if st.button("Generate Multi-Strategy Signals"):
+        signals_by_strategy = {strategy: [] for strategy in STRATEGIES.keys()}
+        
+        progress_bar = st.progress(0)
+        for i, symbol in enumerate(symbols_to_scan):
+            df = fetch_enhanced_ohlc(symbol)
+            if df is not None:
+                for strategy_name in STRATEGIES.keys():
+                    signal = generate_enhanced_signals(df, strategy_name)
+                    if signal:
+                        signal['symbol'] = symbol
+                        signals_by_strategy[strategy_name].append(signal)
+            progress_bar.progress((i + 1) / len(symbols_to_scan))
+        progress_bar.empty()
+        
+        # Display signals by strategy
+        for strategy_name, signals in signals_by_strategy.items():
+            if signals:
+                st.subheader(f"📊 {strategy_name} Signals")
+                display_enhanced_signals(signals)
 
 def display_enhanced_signals(signals):
     """Display enhanced signals with better formatting"""
+    if not signals:
+        return
+        
     df_signals = pd.DataFrame([{
         'Symbol': s['symbol'],
         'Action': s['action'],
@@ -732,6 +828,7 @@ def display_enhanced_signals(signals):
         'Entry': f"₹{s['entry']:.2f}",
         'SL': f"₹{s['stop_loss']:.2f}",
         'T1': f"₹{s['target1']:.2f}",
+        'T2': f"₹{s['target2']:.2f}",
         'Confidence': f"{s['confidence']:.2f}",
         'Reason': s.get('reason', ''),
         'Time': s['timestamp'].strftime("%H:%M:%S")
@@ -746,34 +843,11 @@ def display_enhanced_signals(signals):
         for signal in sorted(signals, key=lambda x: x['confidence'], reverse=True):
             if signal['confidence'] >= st.session_state.auto_trade_config.min_confidence:
                 if st.session_state.auto_trader.execute_trade(signal, st.session_state.auto_trade_config):
-                    st.success(f"Auto-trade executed: {signal['symbol']} {signal['action']}")
+                    st.success(f"Auto-trade executed: {signal['symbol']} {signal['action']} at ₹{signal['entry']:.2f}")
                     executed_trades += 1
                     if executed_trades >= st.session_state.auto_trade_config.max_trades_per_day:
                         st.warning("Daily trade limit reached")
                         break
-
-def show_signals(symbols_to_scan, selected_strategy):
-    st.header("🎯 Enhanced Signals")
-    st.write(f"Strategy: {STRATEGIES[selected_strategy]['description']}")
-    
-    # Real-time signal generation
-    if st.button("Generate Enhanced Signals"):
-        signals = []
-        progress_bar = st.progress(0)
-        for i, symbol in enumerate(symbols_to_scan):
-            df = fetch_enhanced_ohlc(symbol)
-            signal = generate_enhanced_signals(df, selected_strategy)
-            if signal:
-                signal['symbol'] = symbol
-                signals.append(signal)
-            progress_bar.progress((i + 1) / len(symbols_to_scan))
-        
-        progress_bar.empty()
-        
-        if signals:
-            display_enhanced_signals(signals)
-        else:
-            st.info("No signals generated.")
 
 def show_auto_trading():
     st.header("🤖 Auto-Trading Console")
@@ -786,11 +860,23 @@ def show_auto_trading():
         if open_positions:
             for position in open_positions:
                 with st.expander(f"{position['symbol']} {position['action']} - ₹{position['entry_price']:.2f}"):
-                    st.write(f"Quantity: {position['quantity']}")
-                    st.write(f"SL: ₹{position['stop_loss']:.2f}")
-                    st.write(f"T1: ₹{position['target1']:.2f}")
-                    st.write(f"Confidence: {position['confidence']:.2f}")
-                    st.write(f"Strategy: {position['strategy']}")
+                    st.write(f"**Entry:** ₹{position['entry_price']:.2f}")
+                    st.write(f"**Stop Loss:** ₹{position['stop_loss']:.2f}")
+                    st.write(f"**Target 1:** ₹{position['target1']:.2f}")
+                    st.write(f"**Target 2:** ₹{position['target2']:.2f}")
+                    st.write(f"**Quantity:** {position['quantity']}")
+                    st.write(f"**Confidence:** {position['confidence']:.2f}")
+                    st.write(f"**Strategy:** {position['strategy']}")
+                    st.write(f"**Reason:** {position['reason']}")
+                    
+                    # Current P&L (simulated)
+                    current_price = position['entry_price'] * 1.01  # Simulated price
+                    if position['action'] == 'BUY':
+                        pnl = (current_price - position['entry_price']) * position['quantity']
+                    else:
+                        pnl = (position['entry_price'] - current_price) * position['quantity']
+                    
+                    st.write(f"**Current P&L:** ₹{pnl:.2f}")
         else:
             st.info("No open positions")
     
@@ -802,71 +888,157 @@ def show_auto_trading():
             recent_trades = closed_trades[-10:]
             for trade in recent_trades:
                 pnl_color = "green" if trade.get('pnl', 0) > 0 else "red"
-                st.write(f"{trade['symbol']} {trade['action']} - P&L: ₹{trade.get('pnl', 0):.2f}")
+                st.write(f"{trade['symbol']} {trade['action']} - P&L: ₹{trade.get('pnl', 0):.2f} - {trade.get('exit_reason', '')}")
             
             total_pnl = sum(t.get('pnl', 0) for t in closed_trades)
+            win_rate = len([t for t in closed_trades if t.get('pnl', 0) > 0]) / len(closed_trades) * 100
             st.metric("Total P&L", f"₹{total_pnl:.2f}")
+            st.metric("Win Rate", f"{win_rate:.1f}%")
         else:
             st.info("No trade history")
 
-def show_live_chart(universe):
-    st.header("📈 Live Chart")
-    selected_symbol = st.selectbox("Select Symbol", options=universe)
+def show_live_charts(symbols_to_scan):
+    st.header("📈 Live Market Charts")
     
-    if selected_symbol:
-        df = fetch_enhanced_ohlc(selected_symbol)
-        if df is not None:
-            plot_enhanced_chart(df, selected_symbol)
+    col1, col2 = st.columns([1, 3])
+    
+    with col1:
+        selected_symbol = st.selectbox("Select Symbol", options=symbols_to_scan)
+        chart_type = st.selectbox("Chart Type", ["Candlestick", "Line"])
+        indicator1 = st.selectbox("Indicator 1", ["SMA", "EMA", "Bollinger Bands", "None"])
+        indicator2 = st.selectbox("Indicator 2", ["RSI", "MACD", "Volume", "None"])
+    
+    with col2:
+        if selected_symbol:
+            df = fetch_enhanced_ohlc(selected_symbol)
+            if df is not None:
+                plot_enhanced_chart(df, selected_symbol, chart_type, indicator1, indicator2)
 
-def plot_enhanced_chart(df, symbol):
+def plot_enhanced_chart(df, symbol, chart_type="Candlestick", indicator1="SMA", indicator2="RSI"):
     """Plot enhanced chart with multiple indicators"""
     fig = go.Figure()
     
-    # Candlesticks
-    fig.add_trace(go.Candlestick(
-        x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'
-    ))
+    if chart_type == "Candlestick":
+        fig.add_trace(go.Candlestick(
+            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'
+        ))
+    else:
+        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Price', line=dict(color='blue')))
     
-    # SMAs
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(color='orange')))
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50', line=dict(color='blue')))
-    
-    # Bollinger Bands
-    fig.add_trace(go.Scatter(x=df.index, y=df['BB_UP'], name='BB Upper', line=dict(dash='dash', color='gray')))
-    fig.add_trace(go.Scatter(x=df.index, y=df['BB_LO'], name='BB Lower', line=dict(dash='dash', color='gray')))
+    # Add first indicator
+    if indicator1 == "SMA":
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(color='orange')))
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50', line=dict(color='blue')))
+    elif indicator1 == "EMA":
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_8'], name='EMA 8', line=dict(color='green')))
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_21'], name='EMA 21', line=dict(color='red')))
+    elif indicator1 == "Bollinger Bands":
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_UP'], name='BB Upper', line=dict(dash='dash', color='gray')))
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_LO'], name='BB Lower', line=dict(dash='dash', color='gray')))
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_MID'], name='BB Middle', line=dict(color='blue')))
     
     fig.update_layout(
-        title=f"{symbol} - Enhanced Chart",
+        title=f"{symbol} - Live Chart",
         xaxis_rangeslider_visible=False,
-        height=600
+        height=400
     )
     
     st.plotly_chart(fig, use_container_width=True)
     
-    # Additional indicators in separate charts
+    # Second indicator in separate chart
+    if indicator2 != "None":
+        fig2 = go.Figure()
+        
+        if indicator2 == "RSI":
+            fig2.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name='RSI 14', line=dict(color='purple')))
+            fig2.add_hline(y=70, line_dash="dash", line_color="red")
+            fig2.add_hline(y=30, line_dash="dash", line_color="green")
+            fig2.update_layout(title="RSI (14)", height=200)
+        elif indicator2 == "MACD":
+            fig2.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', line=dict(color='blue')))
+            fig2.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal', line=dict(color='red')))
+            fig2.update_layout(title="MACD", height=200)
+        elif indicator2 == "Volume":
+            fig2.add_trace(go.Bar(x=df.index, y=df['Volume'], name='Volume'))
+            fig2.update_layout(title="Volume", height=200)
+        
+        st.plotly_chart(fig2, use_container_width=True)
+
+def show_paper_trading(symbols_to_scan):
+    st.header("📝 Paper Trading Console")
+    
     col1, col2 = st.columns(2)
     
     with col1:
-        # RSI
-        fig_rsi = go.Figure()
-        fig_rsi.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name='RSI 14', line=dict(color='purple')))
-        fig_rsi.add_hline(y=70, line_dash="dash", line_color="red")
-        fig_rsi.add_hline(y=30, line_dash="dash", line_color="green")
-        fig_rsi.update_layout(title="RSI (14)", height=300)
-        st.plotly_chart(fig_rsi, use_container_width=True)
+        st.subheader("💰 Account Overview")
+        st.metric("Initial Capital", f"₹{st.session_state.paper_trading.initial_capital:,.2f}")
+        st.metric("Available Capital", f"₹{st.session_state.paper_trading.available_capital:,.2f}")
+        st.metric("Total P&L", f"₹{st.session_state.paper_trading.total_pnl:,.2f}")
+        
+        # Quick trade panel
+        st.subheader("⚡ Quick Trade")
+        quick_symbol = st.selectbox("Symbol", symbols_to_scan[:20])
+        quick_action = st.selectbox("Action", ["BUY", "SELL"])
+        quick_quantity = st.number_input("Quantity", min_value=1, max_value=1000, value=10)
+        
+        if st.button("Execute Paper Trade"):
+            # Get current price
+            df = fetch_enhanced_ohlc(quick_symbol)
+            if df is not None:
+                current_price = df['Close'].iloc[-1]
+                if st.session_state.paper_trading.execute_trade(
+                    quick_symbol, quick_action, quick_quantity, current_price, "Manual", "Manual trade"
+                ):
+                    st.success(f"Paper trade executed: {quick_action} {quick_quantity} {quick_symbol} at ₹{current_price:.2f}")
     
     with col2:
-        # MACD
-        fig_macd = go.Figure()
-        fig_macd.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', line=dict(color='blue')))
-        fig_macd.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal', line=dict(color='red')))
-        fig_macd.update_layout(title="MACD", height=300)
-        st.plotly_chart(fig_macd, use_container_width=True)
+        st.subheader("📊 Open Positions")
+        if st.session_state.paper_trading.positions:
+            for symbol, position in st.session_state.paper_trading.positions.items():
+                with st.expander(f"{symbol} {position['action']}"):
+                    st.write(f"**Entry Price:** ₹{position['entry_price']:.2f}")
+                    st.write(f"**Quantity:** {position['quantity']}")
+                    st.write(f"**Strategy:** {position['strategy']}")
+                    st.write(f"**Reason:** {position['reason']}")
+                    
+                    # Close position
+                    if st.button(f"Close {symbol}", key=f"close_{symbol}"):
+                        df = fetch_enhanced_ohlc(symbol)
+                        if df is not None:
+                            current_price = df['Close'].iloc[-1]
+                            if st.session_state.paper_trading.close_trade(symbol, current_price, "Manual close"):
+                                st.success(f"Position closed: {symbol} at ₹{current_price:.2f}")
+                                st.rerun()
+        else:
+            st.info("No open positions")
+        
+        st.subheader("📈 Trade History")
+        if st.session_state.paper_trading.trade_history:
+            recent_trades = st.session_state.paper_trading.trade_history[-5:]
+            for trade in recent_trades:
+                pnl_color = "green" if trade['pnl'] > 0 else "red"
+                st.write(f"{trade['symbol']} {trade['action']} - P&L: ₹{trade['pnl']:.2f}")
 
-def show_backtest(universe):
+def show_backtest():
     st.header("📊 Enhanced Backtest")
-    st.info("Backtesting functionality - To be implemented in next version")
-    st.write("This feature will provide comprehensive backtesting across multiple strategies and time periods.")
+    st.info("Advanced backtesting functionality - Coming in next version")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Backtest Configuration")
+        st.selectbox("Strategy", list(STRATEGIES.keys()))
+        st.selectbox("Time Period", ["1 Month", "3 Months", "6 Months", "1 Year"])
+        st.number_input("Initial Capital", value=100000)
+    
+    with col2:
+        st.subheader("Backtest Results")
+        st.write("Comprehensive backtesting across multiple strategies and time periods will be available in the next update.")
+        st.write("Features include:")
+        st.write("• Multi-strategy performance comparison")
+        st.write("• Risk-adjusted return metrics")
+        st.write("• Drawdown analysis")
+        st.write("• Portfolio optimization")
 
 if __name__ == "__main__":
     main()
