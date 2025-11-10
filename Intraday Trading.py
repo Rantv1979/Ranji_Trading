@@ -14,7 +14,6 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 import math
 import warnings
-import ta  # Technical Analysis library
 from typing import Dict, List, Optional
 import json
 warnings.filterwarnings("ignore")
@@ -35,14 +34,11 @@ STRATEGIES = {
         "volume_multiplier": 1.2
     },
     "EMA_Momentum": {
-        "description": "EMA 8/21 with RSI divergence and MACD",
+        "description": "EMA 8/21 with RSI divergence",
         "ema_short": 8,
         "ema_long": 21,
         "rsi_overbought": 75,
         "rsi_oversold": 25,
-        "macd_fast": 12,
-        "macd_slow": 26,
-        "macd_signal": 9
     },
     "Bollinger_RSI_Combo": {
         "description": "Bollinger Band squeeze with RSI extremes",
@@ -52,12 +48,11 @@ STRATEGIES = {
         "rsi_oversold": 30,
         "squeeze_threshold": 0.1
     },
-    "Super_Trend": {
-        "description": "SuperTrend with ATR and volume confirmation",
-        "atr_period": 10,
-        "atr_multiplier": 3,
-        "volume_ma": 20,
-        "min_volume_ratio": 1.5
+    "Mean_Reversion": {
+        "description": "Mean reversion with RSI extremes and volume",
+        "rsi_overbought": 75,
+        "rsi_oversold": 25,
+        "volume_threshold": 1.5
     }
 }
 
@@ -74,6 +69,40 @@ class AutoTradeConfig:
         self.auto_exit = True
         self.profit_target = 0.015  # 1.5%
         self.stop_loss = 0.01  # 1%
+
+# ---------------------------
+# Enhanced Technical Indicators (No external TA library needed)
+# ---------------------------
+def compute_rsi(series, period=14):
+    """Calculate RSI without external library"""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def compute_ema(series, span):
+    """Calculate Exponential Moving Average"""
+    return series.ewm(span=span, adjust=False).mean()
+
+def compute_macd(series, fast=12, slow=26, signal=9):
+    """Calculate MACD without external library"""
+    ema_fast = compute_ema(series, fast)
+    ema_slow = compute_ema(series, slow)
+    macd = ema_fast - ema_slow
+    macd_signal = compute_ema(macd, signal)
+    macd_histogram = macd - macd_signal
+    return macd, macd_signal, macd_histogram
+
+def compute_atr(high, low, close, period=14):
+    """Calculate Average True Range"""
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(period).mean()
+    return atr
 
 # ---------------------------
 # Data Fetching with Enhanced Indicators
@@ -94,14 +123,14 @@ def fetch_enhanced_ohlc(symbol: str, period="1d", interval="5m"):
         return None
 
 def compute_enhanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute enhanced technical indicators"""
+    """Compute enhanced technical indicators without external dependencies"""
     df = df.copy()
     
     # Basic indicators
     df['SMA_20'] = df['Close'].rolling(window=20, min_periods=1).mean()
     df['SMA_50'] = df['Close'].rolling(window=50, min_periods=1).mean()
-    df['EMA_8'] = df['Close'].ewm(span=8, adjust=False).mean()
-    df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
+    df['EMA_8'] = compute_ema(df['Close'], 8)
+    df['EMA_21'] = compute_ema(df['Close'], 21)
     
     # Bollinger Bands
     df['BB_MID'] = df['Close'].rolling(window=20, min_periods=1).mean()
@@ -111,29 +140,31 @@ def compute_enhanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['BB_WIDTH'] = (df['BB_UP'] - df['BB_LO']) / df['BB_MID']
     
     # RSI with multiple periods
-    df['RSI_14'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
-    df['RSI_8'] = ta.momentum.RSIIndicator(df['Close'], window=8).rsi()
+    df['RSI_14'] = compute_rsi(df['Close'], 14)
+    df['RSI_8'] = compute_rsi(df['Close'], 8)
     
     # MACD
-    macd = ta.trend.MACD(df['Close'])
-    df['MACD'] = macd.macd()
-    df['MACD_Signal'] = macd.macd_signal()
-    df['MACD_Histogram'] = macd.macd_diff()
+    macd, macd_signal, macd_histogram = compute_macd(df['Close'])
+    df['MACD'] = macd
+    df['MACD_Signal'] = macd_signal
+    df['MACD_Histogram'] = macd_histogram
     
-    # ATR and SuperTrend
-    df['ATR'] = ta.volatility.AverageTrueRange(df['High'], df['Low'], df['Close'], window=10).average_true_range()
+    # ATR
+    df['ATR'] = compute_atr(df['High'], df['Low'], df['Close'], 10)
     
     # Volume indicators
     if 'Volume' in df.columns:
         df['VOLUME_MA_20'] = df['Volume'].rolling(window=20, min_periods=1).mean()
         df['VOLUME_RATIO'] = df['Volume'] / df['VOLUME_MA_20']
+        df['VOLUME_RATIO'] = df['VOLUME_RATIO'].replace([np.inf, -np.inf], 0).fillna(0)
     else:
         df['Volume'] = 0
         df['VOLUME_MA_20'] = 0
         df['VOLUME_RATIO'] = 0
     
     # VWAP (simplified)
-    df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
+    typical_price = (df['High'] + df['Low'] + df['Close']) / 3
+    df['VWAP'] = (typical_price * df['Volume']).cumsum() / df['Volume'].cumsum()
     
     return df
 
@@ -165,8 +196,8 @@ def generate_enhanced_signals(df: pd.DataFrame, strategy_name: str = "SMA_Crosso
         signal = ema_momentum_strategy(df, strategy)
     elif strategy_name == "Bollinger_RSI_Combo":
         signal = bollinger_rsi_strategy(df, strategy)
-    elif strategy_name == "Super_Trend":
-        signal = super_trend_strategy(df, strategy)
+    elif strategy_name == "Mean_Reversion":
+        signal = mean_reversion_strategy(df, strategy)
     else:
         signal = None
     
@@ -188,8 +219,11 @@ def sma_crossover_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
     volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
     
     # BUY Signal: SMA20 crosses above SMA50, RSI < 70 (not overbought), volume confirmation
-    if (sma20_latest > sma50_latest and sma20_prev <= sma50_prev and
-        rsi < strategy["rsi_overbought"] and volume_ratio > strategy["volume_multiplier"]):
+    if (not math.isnan(sma20_latest) and not math.isnan(sma50_latest) and
+        not math.isnan(sma20_prev) and not math.isnan(sma50_prev) and
+        sma20_latest > sma50_latest and sma20_prev <= sma50_prev and
+        not math.isnan(rsi) and rsi < strategy["rsi_overbought"] and
+        volume_ratio > strategy["volume_multiplier"]):
         
         entry = _safe_scalar_from_row(latest, 'Close')
         bb_lo = _safe_scalar_from_row(latest, 'BB_LO')
@@ -212,8 +246,11 @@ def sma_crossover_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
         }
     
     # SELL Signal: SMA20 crosses below SMA50, RSI > 30 (not oversold), volume confirmation
-    elif (sma20_latest < sma50_latest and sma20_prev >= sma50_prev and
-          rsi > strategy["rsi_oversold"] and volume_ratio > strategy["volume_multiplier"]):
+    elif (not math.isnan(sma20_latest) and not math.isnan(sma50_latest) and
+          not math.isnan(sma20_prev) and not math.isnan(sma50_prev) and
+          sma20_latest < sma50_latest and sma20_prev >= sma50_prev and
+          not math.isnan(rsi) and rsi > strategy["rsi_oversold"] and
+          volume_ratio > strategy["volume_multiplier"]):
         
         entry = _safe_scalar_from_row(latest, 'Close')
         bb_up = _safe_scalar_from_row(latest, 'BB_UP')
@@ -250,8 +287,11 @@ def ema_momentum_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
     macd_signal = _safe_scalar_from_row(latest, 'MACD_Signal')
     
     # BUY Signal: EMA8 above EMA21, MACD bullish, RSI not overbought
-    if (ema8_latest > ema21_latest and ema8_prev <= ema21_prev and
-        macd > macd_signal and rsi < strategy["rsi_overbought"]):
+    if (not math.isnan(ema8_latest) and not math.isnan(ema21_latest) and
+        not math.isnan(ema8_prev) and not math.isnan(ema21_prev) and
+        ema8_latest > ema21_latest and ema8_prev <= ema21_prev and
+        not math.isnan(macd) and not math.isnan(macd_signal) and
+        macd > macd_signal and not math.isnan(rsi) and rsi < strategy["rsi_overbought"]):
         
         entry = _safe_scalar_from_row(latest, 'Close')
         confidence = min(0.95, 0.6 + (0.2 if rsi > 60 else 0) + (0.2 if macd > 0 else 0))
@@ -267,8 +307,11 @@ def ema_momentum_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
         }
     
     # SELL Signal: EMA8 below EMA21, MACD bearish, RSI not oversold
-    elif (ema8_latest < ema21_latest and ema8_prev >= ema21_prev and
-          macd < macd_signal and rsi > strategy["rsi_oversold"]):
+    elif (not math.isnan(ema8_latest) and not math.isnan(ema21_latest) and
+          not math.isnan(ema8_prev) and not math.isnan(ema21_prev) and
+          ema8_latest < ema21_latest and ema8_prev >= ema21_prev and
+          not math.isnan(macd) and not math.isnan(macd_signal) and
+          macd < macd_signal and not math.isnan(rsi) and rsi > strategy["rsi_oversold"]):
         
         entry = _safe_scalar_from_row(latest, 'Close')
         confidence = min(0.95, 0.6 + (0.2 if rsi < 40 else 0) + (0.2 if macd < 0 else 0))
@@ -294,10 +337,13 @@ def bollinger_rsi_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
     bb_lo = _safe_scalar_from_row(latest, 'BB_LO')
     bb_width = _safe_scalar_from_row(latest, 'BB_WIDTH')
     rsi = _safe_scalar_from_row(latest, 'RSI_14')
+    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
     
     # BUY Signal: Price near lower band, RSI oversold, narrow bands (squeeze)
-    if (close <= bb_lo * 1.01 and rsi < strategy["rsi_oversold"] and 
-        bb_width < strategy["squeeze_threshold"]):
+    if (not math.isnan(close) and not math.isnan(bb_lo) and not math.isnan(rsi) and
+        close <= bb_lo * 1.01 and rsi < strategy["rsi_oversold"] and 
+        not math.isnan(bb_width) and bb_width < strategy["squeeze_threshold"] and
+        volume_ratio > 1.0):
         
         confidence = min(0.95, 0.7 + (0.2 if rsi < 25 else 0) + (0.1 if bb_width < 0.05 else 0))
         
@@ -312,8 +358,10 @@ def bollinger_rsi_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
         }
     
     # SELL Signal: Price near upper band, RSI overbought, narrow bands
-    elif (close >= bb_up * 0.99 and rsi > strategy["rsi_overbought"] and
-          bb_width < strategy["squeeze_threshold"]):
+    elif (not math.isnan(close) and not math.isnan(bb_up) and not math.isnan(rsi) and
+          close >= bb_up * 0.99 and rsi > strategy["rsi_overbought"] and
+          not math.isnan(bb_width) and bb_width < strategy["squeeze_threshold"] and
+          volume_ratio > 1.0):
         
         confidence = min(0.95, 0.7 + (0.2 if rsi > 75 else 0) + (0.1 if bb_width < 0.05 else 0))
         
@@ -329,40 +377,48 @@ def bollinger_rsi_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
     
     return None
 
-def super_trend_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
-    """SuperTrend strategy implementation"""
-    # Simplified SuperTrend calculation
-    atr = _safe_scalar_from_row(df.iloc[-1], 'ATR')
-    close = _safe_scalar_from_row(df.iloc[-1], 'Close')
-    hl2 = (_safe_scalar_from_row(df.iloc[-1], 'High') + _safe_scalar_from_row(df.iloc[-1], 'Low')) / 2
+def mean_reversion_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
+    """Mean reversion strategy for overbought/oversold conditions"""
+    latest = df.iloc[-1]
     
-    basic_upper = hl2 + (strategy["atr_multiplier"] * atr)
-    basic_lower = hl2 - (strategy["atr_multiplier"] * atr)
+    close = _safe_scalar_from_row(latest, 'Close')
+    rsi = _safe_scalar_from_row(latest, 'RSI_14')
+    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
+    sma_20 = _safe_scalar_from_row(latest, 'SMA_20')
     
-    # Simplified signal logic
-    volume_ratio = _safe_scalar_from_row(df.iloc[-1], 'VOLUME_RATIO')
+    # BUY Signal: RSI oversold, price below SMA20, high volume
+    if (not math.isnan(rsi) and not math.isnan(close) and not math.isnan(sma_20) and
+        rsi < strategy["rsi_oversold"] and close < sma_20 and 
+        volume_ratio > strategy["volume_threshold"]):
+        
+        confidence = min(0.95, 0.8 - (rsi / 100) + (0.2 if volume_ratio > 2.0 else 0.1))
+        
+        return {
+            'action': 'BUY',
+            'entry': close,
+            'stop_loss': close * 0.985,
+            'target1': sma_20,  # Target at moving average
+            'target2': sma_20 * 1.01,
+            'confidence': confidence,
+            'reason': f"Mean Reversion BUY, RSI oversold {rsi:.1f}, Volume {volume_ratio:.1f}x"
+        }
     
-    if volume_ratio > strategy["min_volume_ratio"]:
-        if close > basic_upper:
-            return {
-                'action': 'BUY',
-                'entry': close,
-                'stop_loss': basic_lower,
-                'target1': close * 1.02,
-                'target2': close * 1.04,
-                'confidence': 0.75,
-                'reason': f"SuperTrend BUY, ATR: {atr:.2f}, Volume: {volume_ratio:.1f}x"
-            }
-        elif close < basic_lower:
-            return {
-                'action': 'SELL',
-                'entry': close,
-                'stop_loss': basic_upper,
-                'target1': close * 0.98,
-                'target2': close * 0.96,
-                'confidence': 0.75,
-                'reason': f"SuperTrend SELL, ATR: {atr:.2f}, Volume: {volume_ratio:.1f}x"
-            }
+    # SELL Signal: RSI overbought, price above SMA20, high volume
+    elif (not math.isnan(rsi) and not math.isnan(close) and not math.isnan(sma_20) and
+          rsi > strategy["rsi_overbought"] and close > sma_20 and
+          volume_ratio > strategy["volume_threshold"]):
+        
+        confidence = min(0.95, (rsi / 100) - 0.2 + (0.2 if volume_ratio > 2.0 else 0.1))
+        
+        return {
+            'action': 'SELL',
+            'entry': close,
+            'stop_loss': close * 1.015,
+            'target1': sma_20,  # Target at moving average
+            'target2': sma_20 * 0.99,
+            'confidence': confidence,
+            'reason': f"Mean Reversion SELL, RSI overbought {rsi:.1f}, Volume {volume_ratio:.1f}x"
+        }
     
     return None
 
@@ -469,7 +525,7 @@ class AutoTradingEngine:
             del self.positions[symbol]
 
 # ---------------------------
-# Utility Functions (Keep from original)
+# Utility Functions
 # ---------------------------
 def _safe_scalar_from_row(row, key, default=np.nan):
     """Return a safe scalar float for row[key]"""
@@ -488,7 +544,7 @@ def _safe_scalar_from_row(row, key, default=np.nan):
 
 @st.cache_data(ttl=60*60)
 def fetch_nifty500_list():
-    # Keep original implementation
+    """Fetch NIFTY 500 constituents"""
     try:
         url = "https://finance.yahoo.com/quote/%5ECRSLDX/components/"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -524,6 +580,31 @@ def fetch_nifty500_list():
         return None
 
 # ---------------------------
+# Stock Universe
+# ---------------------------
+NIFTY_50 = [
+    "RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS","INFY.NS","TCS.NS",
+    "KOTAKBANK.NS","HINDUNILVR.NS","AXISBANK.NS","LT.NS","SBIN.NS",
+    "ITC.NS","BAJFINANCE.NS","BHARTIARTL.NS","MARUTI.NS",
+    "ONGC.NS","TITAN.NS","ULTRACEMCO.NS","NTPC.NS","SUNPHARMA.NS",
+    "HCLTECH.NS","POWERGRID.NS","WIPRO.NS","TECHM.NS","BPCL.NS",
+    "COALINDIA.NS","BRITANNIA.NS","DIVISLAB.NS","HDFCLIFE.NS","ADANIENT.NS",
+    "GRASIM.NS","DLF.NS","ADANIPORTS.NS","EICHERMOT.NS","CIPLA.NS",
+    "IOC.NS","JSWSTEEL.NS","SBILIFE.NS","TATASTEEL.NS","INDUSINDBK.NS",
+    "HINDALCO.NS","NESTLEIND.NS","DRREDDY.NS","BAJAJ-AUTO.NS","SHREECEM.NS",
+    "TATAELXSI.NS","MRF.NS","PIDILITIND.NS","BAJAJFINSV.NS"
+]
+
+NIFTY_NEXT_50 = [
+    "ADANITRANS.NS","APOLLOHOSP.NS","ADANIGREEN.NS","AUROPHARMA.NS","BERGEPAINT.NS",
+    "BOSCHLTD.NS","CASTROLIND.NS","INDIGO.NS","GODREJCP.NS","HAVELLS.NS",
+    "HEROMOTOCO.NS","HINDZINC.NS","ICICIPRULI.NS","INDIAMART.NS","LICHSGFIN.NS",
+    "LUPIN.NS","MUTHOOTFIN.NS","PEL.NS"
+]
+
+NIFTY_100 = sorted(list(set(NIFTY_50 + NIFTY_NEXT_50)))
+
+# ---------------------------
 # Enhanced UI with Auto-Trading
 # ---------------------------
 
@@ -543,7 +624,8 @@ def main():
     selected_strategy = st.sidebar.selectbox(
         "Trading Strategy",
         options=list(STRATEGIES.keys()),
-        format_func=lambda x: f"{x} - {STRATEGIES[x]['description']}"
+        format_func=lambda x: f"{x} - {STRATEGIES[x]['description']}",
+        index=0
     )
     
     # Auto-Trading Configuration
@@ -562,19 +644,39 @@ def main():
             "Risk Per Trade (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.5
         ) / 100
     
-    # Universe selection (keep original)
+    # Refresh controls
+    st.sidebar.subheader("🔄 Refresh Controls")
+    refresh_now = st.sidebar.button("Refresh Signals Now")
+    auto_refresh = st.sidebar.checkbox("Auto Refresh", value=True)
+    refresh_interval = st.sidebar.slider("Refresh Interval (seconds)", 10, 60, 30)
+    
+    if auto_refresh:
+        st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
+    
+    # Universe selection
     with st.spinner("Loading market data..."):
         nifty500 = fetch_nifty500_list()
         universe = nifty500 if nifty500 else NIFTY_100
+    
+    # Symbol selection
+    st.sidebar.subheader("📊 Symbol Selection")
+    symbols_to_scan = st.sidebar.multiselect(
+        "Symbols to scan (empty = all)",
+        options=universe,
+        default=universe[:20]  # First 20 for performance
+    )
+    
+    if not symbols_to_scan:
+        symbols_to_scan = universe[:50]  # Limit to 50 for performance
     
     # Main Tabs
     tabs = st.tabs(["📊 Dashboard", "🎯 Signals", "🤖 Auto-Trade", "📈 Live Chart", "📊 Backtest"])
     
     with tabs[0]:
-        show_dashboard(universe, selected_strategy)
+        show_dashboard(symbols_to_scan, selected_strategy, refresh_now)
     
     with tabs[1]:
-        show_signals(universe, selected_strategy)
+        show_signals(symbols_to_scan, selected_strategy)
     
     with tabs[2]:
         show_auto_trading()
@@ -585,12 +687,12 @@ def main():
     with tabs[4]:
         show_backtest(universe)
 
-def show_dashboard(universe, selected_strategy):
+def show_dashboard(symbols_to_scan, selected_strategy, refresh_now):
     st.header("📊 Enhanced Dashboard")
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Universe Size", len(universe))
+        st.metric("Symbols Scanning", len(symbols_to_scan))
     with col2:
         st.metric("Selected Strategy", selected_strategy)
     with col3:
@@ -598,21 +700,20 @@ def show_dashboard(universe, selected_strategy):
     
     # Quick scan with progress
     st.subheader("🚀 Quick Market Scan")
-    scan_symbols = st.multiselect("Symbols to scan", options=universe, default=universe[:50])
     
-    if st.button("Run Enhanced Scan"):
+    if st.button("Run Enhanced Scan") or refresh_now:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         all_signals = []
-        for i, symbol in enumerate(scan_symbols):
-            status_text.text(f"Scanning {i+1}/{len(scan_symbols)}: {symbol}")
+        for i, symbol in enumerate(symbols_to_scan):
+            status_text.text(f"Scanning {i+1}/{len(symbols_to_scan)}: {symbol}")
             df = fetch_enhanced_ohlc(symbol)
             signal = generate_enhanced_signals(df, selected_strategy)
             if signal:
                 signal['symbol'] = symbol
                 all_signals.append(signal)
-            progress_bar.progress((i + 1) / len(scan_symbols))
+            progress_bar.progress((i + 1) / len(symbols_to_scan))
         
         progress_bar.empty()
         status_text.empty()
@@ -641,26 +742,38 @@ def display_enhanced_signals(signals):
     # Auto-trade execution
     if st.session_state.auto_trade_config.enabled:
         st.subheader("🤖 Auto-Trade Execution")
+        executed_trades = 0
         for signal in sorted(signals, key=lambda x: x['confidence'], reverse=True):
             if signal['confidence'] >= st.session_state.auto_trade_config.min_confidence:
                 if st.session_state.auto_trader.execute_trade(signal, st.session_state.auto_trade_config):
                     st.success(f"Auto-trade executed: {signal['symbol']} {signal['action']}")
+                    executed_trades += 1
+                    if executed_trades >= st.session_state.auto_trade_config.max_trades_per_day:
+                        st.warning("Daily trade limit reached")
+                        break
 
-def show_signals(universe, selected_strategy):
+def show_signals(symbols_to_scan, selected_strategy):
     st.header("🎯 Enhanced Signals")
     st.write(f"Strategy: {STRATEGIES[selected_strategy]['description']}")
     
     # Real-time signal generation
     if st.button("Generate Enhanced Signals"):
         signals = []
-        for symbol in universe[:100]:  # Limit for performance
+        progress_bar = st.progress(0)
+        for i, symbol in enumerate(symbols_to_scan):
             df = fetch_enhanced_ohlc(symbol)
             signal = generate_enhanced_signals(df, selected_strategy)
             if signal:
                 signal['symbol'] = symbol
                 signals.append(signal)
+            progress_bar.progress((i + 1) / len(symbols_to_scan))
         
-        display_enhanced_signals(signals)
+        progress_bar.empty()
+        
+        if signals:
+            display_enhanced_signals(signals)
+        else:
+            st.info("No signals generated.")
 
 def show_auto_trading():
     st.header("🤖 Auto-Trading Console")
@@ -669,7 +782,7 @@ def show_auto_trading():
     
     with col1:
         st.subheader("📊 Open Positions")
-        open_positions = [t for t in st.session_state.auto_trader.trades if t['status'] == 'OPEN']
+        open_positions = [t for t in st.session_state.auto_trader.trades if t.get('status') == 'OPEN']
         if open_positions:
             for position in open_positions:
                 with st.expander(f"{position['symbol']} {position['action']} - ₹{position['entry_price']:.2f}"):
@@ -677,17 +790,21 @@ def show_auto_trading():
                     st.write(f"SL: ₹{position['stop_loss']:.2f}")
                     st.write(f"T1: ₹{position['target1']:.2f}")
                     st.write(f"Confidence: {position['confidence']:.2f}")
+                    st.write(f"Strategy: {position['strategy']}")
         else:
             st.info("No open positions")
     
     with col2:
         st.subheader("📈 Trade History")
-        closed_trades = [t for t in st.session_state.auto_trader.trades if t['status'] == 'CLOSED']
+        closed_trades = [t for t in st.session_state.auto_trader.trades if t.get('status') == 'CLOSED']
         if closed_trades:
-            df_trades = pd.DataFrame(closed_trades[-10:])  # Last 10 trades
-            st.dataframe(df_trades[['symbol', 'action', 'entry_price', 'exit_price', 'pnl', 'exit_reason']])
+            # Display last 10 trades
+            recent_trades = closed_trades[-10:]
+            for trade in recent_trades:
+                pnl_color = "green" if trade.get('pnl', 0) > 0 else "red"
+                st.write(f"{trade['symbol']} {trade['action']} - P&L: ₹{trade.get('pnl', 0):.2f}")
             
-            total_pnl = sum(t['pnl'] for t in closed_trades if 'pnl' in t)
+            total_pnl = sum(t.get('pnl', 0) for t in closed_trades)
             st.metric("Total P&L", f"₹{total_pnl:.2f}")
         else:
             st.info("No trade history")
@@ -748,31 +865,8 @@ def plot_enhanced_chart(df, symbol):
 
 def show_backtest(universe):
     st.header("📊 Enhanced Backtest")
-    # Backtest implementation similar to original but with enhanced strategies
-    st.info("Enhanced backtesting with multiple strategies - Implementation similar to original but with strategy selection")
-
-# Original constants (keep at end)
-NIFTY_50 = [
-    "RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS","INFY.NS","TCS.NS",
-    "KOTAKBANK.NS","HINDUNILVR.NS","AXISBANK.NS","LT.NS","SBIN.NS",
-    "ITC.NS","BAJFINANCE.NS","HDFC.NS","BHARTIARTL.NS","MARUTI.NS",
-    "ONGC.NS","TITAN.NS","ULTRACEMCO.NS","NTPC.NS","SUNPHARMA.NS",
-    "HCLTECH.NS","POWERGRID.NS","WIPRO.NS","TECHM.NS","BPCL.NS",
-    "COALINDIA.NS","BRITANNIA.NS","DIVISLAB.NS","HDFCLIFE.NS","ADANIENT.NS",
-    "GRASIM.NS","DLF.NS","ADANIPORTS.NS","EICHERMOT.NS","CIPLA.NS",
-    "IOC.NS","JSWSTEEL.NS","SBILIFE.NS","TATASTEEL.NS","INDUSINDBK.NS",
-    "HINDALCO.NS","NESTLEIND.NS","DRREDDY.NS","BAJAJ-AUTO.NS","SHREECEM.NS",
-    "TATAELXSI.NS","MRF.NS","PIDILITIND.NS","BAJAJFINSV.NS"
-]
-
-NIFTY_NEXT_50 = [
-    "ADANITRANS.NS","APOLLOHOSP.NS","ADANIGREEN.NS","AUROPHARMA.NS","BERGEPAINT.NS",
-    "BOSCHLTD.NS","CASTROLIND.NS","INDIGO.NS","GODREJCP.NS","HAVELLS.NS",
-    "HEROMOTOCO.NS","HINDZINC.NS","ICICIPRULI.NS","INDIAMART.NS","LICHSGFIN.NS",
-    "LUPIN.NS","MUTHOOTFIN.NS","PEL.NS"
-]
-
-NIFTY_100 = sorted(list(set(NIFTY_50 + NIFTY_NEXT_50)))
+    st.info("Backtesting functionality - To be implemented in next version")
+    st.write("This feature will provide comprehensive backtesting across multiple strategies and time periods.")
 
 if __name__ == "__main__":
     main()
