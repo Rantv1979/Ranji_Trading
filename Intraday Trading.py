@@ -17,9 +17,10 @@ import warnings
 from typing import Dict, List, Optional
 import json
 import smtplib
-from email.mime.text import MimeText
-from email.mime.multipart import MimeMultipart
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import os
+import sys
 warnings.filterwarnings("ignore")
 
 st.set_page_config(layout="wide", page_title="Gemini Intraday Pro — Trading Terminal")
@@ -38,12 +39,17 @@ EMAIL_CONFIG = {
 def send_email_notification(subject, message):
     """Send email notification for auto-trades"""
     try:
-        msg = MimeMultipart()
+        # Check if email is configured
+        if EMAIL_CONFIG["sender_email"] == "your.email@gmail.com":
+            print("Email not configured. Please update EMAIL_CONFIG with your details.")
+            return False
+            
+        msg = MIMEMultipart()
         msg['From'] = EMAIL_CONFIG["sender_email"]
         msg['To'] = EMAIL_CONFIG["receiver_email"]
         msg['Subject'] = subject
         
-        msg.attach(MimeText(message, 'plain'))
+        msg.attach(MIMEText(message, 'plain'))
         
         server = smtplib.SMTP(EMAIL_CONFIG["smtp_server"], EMAIL_CONFIG["smtp_port"])
         server.starttls()
@@ -869,7 +875,7 @@ def main():
         
         # Email configuration
         st.sidebar.subheader("📧 Email Configuration")
-        st.sidebar.info("Configure email settings for trade notifications")
+        st.sidebar.info("Configure email settings in the code (EMAIL_CONFIG dictionary)")
     
     # Paper Trading
     st.sidebar.subheader("📝 Paper Trading")
@@ -998,6 +1004,19 @@ def show_live_signals(symbols_to_scan, focus_strategies):
             if all_signals:
                 st.success(f"Found {len(all_signals)} signals!")
                 display_signals_table(all_signals)
+                
+                # Auto-trade execution
+                if st.session_state.auto_trade_config.enabled:
+                    st.subheader("🤖 Auto-Trade Execution")
+                    executed_trades = 0
+                    for signal in sorted(all_signals, key=lambda x: x['confidence'], reverse=True):
+                        if signal['confidence'] >= st.session_state.auto_trade_config.min_confidence:
+                            if st.session_state.auto_trader.execute_trade(signal, st.session_state.auto_trade_config):
+                                st.success(f"Auto-trade executed: {signal['symbol']} {signal['action']}")
+                                executed_trades += 1
+                                if executed_trades >= st.session_state.auto_trade_config.max_trades_per_day:
+                                    st.warning("Daily trade limit reached")
+                                    break
             else:
                 st.warning("No signals found. Try adjusting strategy parameters.")
 
@@ -1145,25 +1164,4 @@ def run_headless_scan():
     return all_signals
 
 if __name__ == "__main__":
-    # Check if running in server mode
-    if len(sys.argv) > 1 and sys.argv[1] == "--headless":
-        # Run in headless mode for server deployment
-        import schedule
-        import time as ttime
-        import sys
-        
-        print("Starting Gemini Intraday Pro in headless mode...")
-        
-        # Schedule scans every 10 minutes during market hours
-        schedule.every(10).minutes.do(run_headless_scan)
-        
-        # Run initial scan
-        run_headless_scan()
-        
-        # Keep running
-        while True:
-            schedule.run_pending()
-            ttime.sleep(60)
-    else:
-        # Run normal Streamlit app
-        main()
+    main()
