@@ -1,5 +1,8 @@
-# gemini_intraday_updated.py
-# Advanced Intraday Options Trading Terminal (Updated with Paper Trading, Trade Log, Live Chart tabs)
+# gemini_intraday_final.py
+# Advanced Intraday Options Trading Terminal (Final) 
+# Includes: Paper Trading, Trade Log, Live Chart, Sound Alerts, Per-symbol filters,
+# Advanced export columns, Manual Order Book, independent live-chart refresh control.
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -14,7 +17,7 @@ import uuid
 warnings.filterwarnings('ignore')
 import yfinance as yf
 from streamlit_autorefresh import st_autorefresh
-import math
+import streamlit.components.v1 as components
 
 # -------------------------
 # 1. SESSION STATE INIT
@@ -25,21 +28,25 @@ if 'initialized' not in st.session_state:
     st.session_state.last_refresh = datetime.now()
     st.session_state.generated_signals = []
     st.session_state.signal_history = []
-    st.session_state.executed_trades = []  # list of Trade dataclass instances
+    st.session_state.executed_trades = []       # list of Trade dataclass instances
     st.session_state.options_data = {}
     st.session_state.auto_refresh = True
     st.session_state.auto_execute = False
     st.session_state.refresh_interval = 10
+    st.session_state.chart_refresh_interval = 10
     st.session_state.tracked_symbols = set()
     st.session_state.pending_execution = []
     st.session_state.execution_logs = []
     st.session_state.capital = 100000.00
     st.session_state.pnl = 0.00
     st.session_state.unrealized_pnl = 0.00
-    st.session_state.portfolio = {}  # {'symbol': {'quantity': X, 'entry_price': Y, 'type': 'CE'|'PE'}}
+    st.session_state.portfolio = {}            # {'symbol': {'quantity': X, 'entry_price': Y, 'type': 'CE'|'PE'}}
     st.session_state.signals_by_cohort = {}
     st.session_state.selected_symbol = None
     st.session_state.live_chart_ref = 0
+    st.session_state.play_beep_id = None        # used to trigger audio/JS beep
+    st.session_state.order_book = []            # list of manual orders: dicts
+    st.session_state.prev_execution_count = 0
 
 # -------------------------
 # 2. DATACLASSES
@@ -137,25 +144,22 @@ def generate_signals_for_symbol(symbol: str):
         return None
     latest = df.iloc[-1]
     prev = df.iloc[-2]
-    # SMA crossover
     try:
         if latest['SMA_20'] > latest['SMA_50'] and prev['SMA_20'] <= prev['SMA_50']:
-            action = "BUY"
             entry = latest['Close']
             stop_loss = float(latest.get('Bollinger_Lower', entry * 0.99))
             target1 = entry * 1.015
             target2 = entry * 1.03
             confidence = float(min(0.95, (latest['RSI'] / 100) if not np.isnan(latest['RSI']) else 0.6))
-            return Signal(str(uuid.uuid4()), df.index[-1].to_pydatetime(), symbol, action, "SMA Crossover",
+            return Signal(str(uuid.uuid4()), df.index[-1].to_pydatetime(), symbol, "BUY", "SMA Crossover",
                           confidence, entry, stop_loss, target1, target2, option_type='CE')
         if latest['SMA_20'] < latest['SMA_50'] and prev['SMA_20'] >= prev['SMA_50']:
-            action = "SELL"
             entry = latest['Close']
             stop_loss = float(latest.get('Bollinger_Upper', entry * 1.01))
             target1 = entry * 0.985
             target2 = entry * 0.97
             confidence = float(min(0.95, (100 - latest['RSI']) / 100 if not np.isnan(latest['RSI']) else 0.6))
-            return Signal(str(uuid.uuid4()), df.index[-1].to_pydatetime(), symbol, action, "SMA Crossover",
+            return Signal(str(uuid.uuid4()), df.index[-1].to_pydatetime(), symbol, "SELL", "SMA Crossover",
                           confidence, entry, stop_loss, target1, target2, option_type='PE')
     except Exception:
         return None
@@ -183,12 +187,15 @@ def generate_all_signals():
     st.session_state.last_refresh = datetime.now()
 
 # -------------------------
-# 6. PAPER TRADE EXECUTION + PNL
+# 6. PAPER TRADE EXECUTION + PNL + ORDER BOOK
 # -------------------------
+def _trigger_beep():
+    """Set a unique id so UI will render JS audio element to play beep once."""
+    st.session_state.play_beep_id = str(uuid.uuid4())
+
 def execute_signal_paper(signal: Signal, quantity: int = 100):
     if signal.executed:
         return None
-    # Basic capital check: require capital >= entry * quantity
     cost = signal.entry * quantity
     if st.session_state.capital < cost:
         st.warning("Insufficient capital for simulated execution.")
@@ -204,16 +211,48 @@ def execute_signal_paper(signal: Signal, quantity: int = 100):
                   signal.strategy, signal.entry, signal.stop_loss, signal.target1, signal.target2, quantity)
     st.session_state.executed_trades.append(trade)
     log = f"EXECUTED {trade.action} {trade.symbol} @ {trade.entry_price:.2f} x{trade.quantity}"
-    st.session_state.execution_logs.insert(0, f"[{datetime.now().strftime('%H:%M:%S')}] {log}")
+    st.session_state.execution_logs.insert(0, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {log}")
+    _trigger_beep()
     return trade
 
 def manual_place_order(symbol: str, action: str, option_type: str, entry_price: float, quantity: int, stop_loss: float, target1: float, target2: float):
-    # Create a fake signal and execute it
-    sig = Signal(str(uuid.uuid4()), datetime.now(), symbol, action, "Manual", 1.0, entry_price, stop_loss, target1, target2, option_type=option_type)
-    return execute_signal_paper(sig, quantity=quantity)
+    order = {
+        'id': str(uuid.uuid4()),
+        'timestamp': datetime.now(),
+        'symbol': symbol,
+        'action': action,
+        'option_type': option_type,
+        'entry_price': float(entry_price),
+        'quantity': int(quantity),
+        'stop_loss': float(stop_loss),
+        'target1': float(target1),
+        'target2': float(target2),
+        'status': 'OPEN'  # OPEN, EXECUTED, CANCELLED
+    }
+    st.session_state.order_book.insert(0, order)
+    return order
+
+def execute_order_from_book(order_id: str):
+    for o in st.session_state.order_book:
+        if o['id'] == order_id and o['status'] == 'OPEN':
+            # create Signal-like object to reuse execution
+            sig = Signal(str(uuid.uuid4()), datetime.now(), o['symbol'], o['action'], "Manual Order", 1.0,
+                         o['entry_price'], o['stop_loss'], o['target1'], o['target2'], option_type=o['option_type'])
+            trade = execute_signal_paper(sig, quantity=o['quantity'])
+            if trade:
+                o['status'] = 'EXECUTED'
+                o['executed_trade_id'] = trade.id
+                return trade
+    return None
+
+def cancel_order_from_book(order_id: str):
+    for o in st.session_state.order_book:
+        if o['id'] == order_id and o['status'] == 'OPEN':
+            o['status'] = 'CANCELLED'
+            return o
+    return None
 
 def update_pnl():
-    # Realized pnl from trades that have exit_price set (none here unless exit is implemented)
     realized = sum(t.pnl for t in st.session_state.executed_trades if t.exit_price is not None)
     unrealized = 0.0
     for symbol, pos in st.session_state.portfolio.items():
@@ -231,7 +270,7 @@ def update_pnl():
     st.session_state.unrealized_pnl = unrealized
 
 # -------------------------
-# 7. UI HELPERS: CHARTS, STYLES
+# 7. UI HELPERS: CHARTS, STYLES, AUDIO
 # -------------------------
 def inject_css():
     st.markdown("""
@@ -241,6 +280,7 @@ def inject_css():
     .signal-box { padding:8px; border-radius:6px; margin-bottom:6px; }
     .buy { background-color:#e6fff0; border-left:6px solid #2ecc71; }
     .sell { background-color:#fff0f0; border-left:6px solid #e74c3c; }
+    .order-open { background:#fffbe6; border-left:6px solid #f39c12; padding:8px; border-radius:6px; margin-bottom:6px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -265,6 +305,34 @@ def plot_candlestick_with_indicators(symbol: str, df: pd.DataFrame, height=500):
     fig.update_layout(title=f"{symbol} Intraday", xaxis_rangeslider_visible=False, height=height, margin=dict(l=10, r=10, t=45, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
+def render_beep_player():
+    """Render a tiny JS-based beep if play_beep_id was set since last render."""
+    pid = st.session_state.get('play_beep_id', None)
+    # Only render audio tag when pid exists. Each new pid will cause the browser to run the script.
+    if pid:
+        js = f"""
+        <script>
+        (function() {{
+            try {{
+                // create short beep via WebAudio API
+                var ctx = new (window.AudioContext || window.webkitAudioContext)();
+                var o = ctx.createOscillator();
+                var g = ctx.createGain();
+                o.type = "sine";
+                o.frequency.value = 880;
+                g.gain.value = 0.06;
+                o.connect(g);
+                g.connect(ctx.destination);
+                o.start();
+                setTimeout(function(){{ o.stop(); }}, 180);
+            }} catch(e) {{
+                console.log("beep failed", e);
+            }}
+        }})();
+        </script>
+        """
+        components.html(js, height=0)
+
 # -------------------------
 # 8. UI: SIDEBAR
 # -------------------------
@@ -272,8 +340,9 @@ def sidebar_controls():
     st.sidebar.title("⚙️ Controls")
     st.session_state.auto_refresh = st.sidebar.checkbox("Auto Refresh", value=st.session_state.auto_refresh)
     st.session_state.auto_execute = st.sidebar.checkbox("Auto Execute (Paper)", value=st.session_state.auto_execute)
-    st.session_state.refresh_interval = st.sidebar.slider("Refresh Interval (s)", min_value=5, max_value=60, value=st.session_state.refresh_interval, step=5)
-    st.sidebar.markdown(f"**Last refresh:** {st.session_state.last_refresh.strftime('%Y-%m-%d %H:%M:%S')}")
+    st.session_state.refresh_interval = st.sidebar.slider("Engine Refresh Interval (s)", min_value=5, max_value=60, value=st.session_state.refresh_interval, step=5)
+    st.session_state.chart_refresh_interval = st.sidebar.slider("Live Chart Refresh Interval (s)", min_value=2, max_value=60, value=st.session_state.chart_refresh_interval, step=1)
+    st.sidebar.markdown(f"**Last engine refresh:** {st.session_state.last_refresh.strftime('%Y-%m-%d %H:%M:%S')}")
     st.sidebar.markdown("### Chart / Symbol")
     sym = st.sidebar.selectbox("Selected Symbol", options=ALL_TRACKED_SYMBOLS, index=ALL_TRACKED_SYMBOLS.index(st.session_state.selected_symbol))
     st.session_state.selected_symbol = sym
@@ -324,20 +393,22 @@ def tab_dashboard():
             else:
                 for sig in signals:
                     cls = "buy" if sig.action == "BUY" else "sell"
+                    executed_mark = "✅" if sig.executed else "❌"
                     st.markdown(f"<div class='signal-box {cls}'>"
-                                f"<strong>{sig.symbol}</strong> — {sig.action} | {sig.strategy} | Confidence: {sig.confidence:.0%}<br>"
+                                f"<strong>{sig.symbol}</strong> — {sig.action} | {sig.strategy} | Confidence: {sig.confidence:.0%} | {executed_mark}<br>"
                                 f"Entry: ₹{sig.entry:.2f} | SL: ₹{sig.stop_loss:.2f} | T1: ₹{sig.target1:.2f}</div>", unsafe_allow_html=True)
     st.markdown("---")
     st.subheader("Execution Logs")
     if st.session_state.execution_logs:
-        st.code("\n".join(st.session_state.execution_logs), language='text')
+        # Highlight most recent on top
+        st.code("\n".join(st.session_state.execution_logs[:200]), language='text')
     else:
         st.info("No execution logs yet.")
 
 def tab_paper_trading():
     st.header("🏦 Paper Trading")
-    # Manual order entry
-    st.subheader("Manual Order Entry")
+    # Manual order entry form -> adds to order book
+    st.subheader("Manual Order Entry (Order Book)")
     with st.form("manual_order_form", clear_on_submit=False):
         col1, col2, col3 = st.columns([1,1,1])
         with col1:
@@ -351,18 +422,41 @@ def tab_paper_trading():
             sl = st.number_input("Stop Loss (₹)", min_value=0.0, value=0.0, format="%.2f")
         t1 = st.number_input("Target 1 (₹)", min_value=0.0, value=0.0, format="%.2f")
         t2 = st.number_input("Target 2 (₹)", min_value=0.0, value=0.0, format="%.2f")
-        submitted = st.form_submit_button("Place Manual Paper Order")
+        submitted = st.form_submit_button("Add to Order Book")
     if submitted:
         if price <= 0:
             st.error("Enter a valid entry price.")
         else:
-            trade = manual_place_order(symbol, action, option_type, price, int(quantity), sl or 0.0, t1 or 0.0, t2 or 0.0)
-            if trade:
-                st.success(f"Order placed: {action} {symbol} x{quantity} @ ₹{price:.2f}")
-            else:
-                st.error("Order failed (insufficient capital or other error).")
+            order = manual_place_order(symbol, action, option_type, price, int(quantity), sl or 0.0, t1 or 0.0, t2 or 0.0)
+            st.success(f"Order added to order book: {action} {symbol} x{quantity} @ ₹{price:.2f}")
 
-    # Portfolio summary
+    st.markdown("---")
+    st.subheader("Order Book")
+    if st.session_state.order_book:
+        for o in list(st.session_state.order_book):
+            status = o['status']
+            status_color = "order-open" if status == 'OPEN' else ("",)
+            st.markdown(f"<div class='order-open'><strong>{o['symbol']}</strong> | {o['action']} {o['option_type']} x{o['quantity']} @ ₹{o['entry_price']:.2f} | Status: {status} | {o['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}</div>", unsafe_allow_html=True)
+            cols = st.columns([1,1,1,6])
+            with cols[0]:
+                if st.button(f"Execute-{o['id']}", key=f"exec_{o['id']}") and o['status']=='OPEN':
+                    res = execute_order_from_book(o['id'])
+                    if res:
+                        st.success(f"Order executed: {o['symbol']} x{o['quantity']}")
+                        st.experimental_rerun()
+            with cols[1]:
+                if st.button(f"Cancel-{o['id']}", key=f"cancel_{o['id']}") and o['status']=='OPEN':
+                    cancel_order_from_book(o['id'])
+                    st.info(f"Order cancelled: {o['symbol']}")
+                    st.experimental_rerun()
+            with cols[2]:
+                if st.button(f"Remove-{o['id']}", key=f"remove_{o['id']}"):
+                    st.session_state.order_book = [x for x in st.session_state.order_book if x['id'] != o['id']]
+                    st.experimental_rerun()
+    else:
+        st.info("Order book is empty. Add manual orders above.")
+
+    # Portfolio summary & quick actions
     st.markdown("---")
     st.subheader("Portfolio (Paper)")
     update_pnl()
@@ -377,13 +471,11 @@ def tab_paper_trading():
     else:
         st.info("No open positions in the paper portfolio.")
 
-    # Quick actions on portfolio
     st.markdown("---")
     st.subheader("Portfolio Actions")
     pcol1, pcol2 = st.columns(2)
     with pcol1:
         if st.button("Close All Positions (Simulated)"):
-            # Simple close: compute pnl using last price and add back capital
             closed = []
             for s, pos in list(st.session_state.portfolio.items()):
                 try:
@@ -397,8 +489,6 @@ def tab_paper_trading():
                 except Exception:
                     pnl_total = 0.0
                     last_price = pos['entry_price']
-                # create trade exit
-                # find matching trade and set exit
                 for t in st.session_state.executed_trades:
                     if t.symbol == s and t.exit_price is None:
                         t.exit_price = last_price
@@ -417,56 +507,76 @@ def tab_paper_trading():
             st.session_state.execution_logs = []
             st.session_state.pnl = 0.0
             st.session_state.unrealized_pnl = 0.0
+            st.session_state.order_book = []
             st.success("Paper account reset.")
 
 def tab_trade_log():
-    st.header("📜 Trade Log")
-    if st.session_state.executed_trades:
-        # Build dataframe
-        rows = []
-        for t in st.session_state.executed_trades:
-            rows.append({
-                "ID": t.id,
-                "Timestamp": t.timestamp.strftime("%Y-%m-%d %H:%M:%S") if t.timestamp else "",
-                "Symbol": t.symbol,
-                "Action": t.action,
-                "Qty": t.quantity,
-                "Entry": t.entry_price,
-                "Exit": t.exit_price if t.exit_price is not None else "",
-                "Realized PNL": t.pnl
-            })
+    st.header("📜 Trade Log (Advanced)")
+    # Filters
+    st.subheader("Filters")
+    cols = st.columns([2,2,2,2])
+    symbol_filter = cols[0].selectbox("Filter by Symbol", options=["All"] + ALL_TRACKED_SYMBOLS)
+    date_from = cols[1].date_input("From Date", value=(datetime.now() - timedelta(days=7)).date())
+    date_to = cols[2].date_input("To Date", value=datetime.now().date())
+    min_pnl = cols[3].number_input("Min Realized PNL", value= -1e9, format="%.2f")
+
+    # Build log dataframe with advanced columns
+    rows = []
+    for t in st.session_state.executed_trades:
+        rows.append({
+            "ID": t.id,
+            "Timestamp": t.timestamp.strftime("%Y-%m-%d %H:%M:%S") if t.timestamp else "",
+            "Symbol": t.symbol,
+            "Action": t.action,
+            "Qty": t.quantity,
+            "Entry": t.entry_price,
+            "Exit": t.exit_price if t.exit_price is not None else "",
+            "Realized PNL": t.pnl,
+            "Strategy": t.strategy,
+            "Option Type": t.option_type
+        })
+    if rows:
         df_log = pd.DataFrame(rows)
-        st.dataframe(df_log.sort_values(by="Timestamp", ascending=False), use_container_width=True)
-        csv = df_log.to_csv(index=False).encode('utf-8')
-        st.download_button("Download CSV", csv, file_name="trade_log.csv", mime="text/csv")
-        if st.button("Clear Trade Log"):
-            st.session_state.executed_trades = []
-            st.success("Trade log cleared.")
+        # apply filters
+        df_log['Timestamp_dt'] = pd.to_datetime(df_log['Timestamp'], errors='coerce')
+        df_filtered = df_log[
+            (df_log['Timestamp_dt'].dt.date >= pd.to_datetime(date_from).date()) &
+            (df_log['Timestamp_dt'].dt.date <= pd.to_datetime(date_to).date())
+        ]
+        if symbol_filter != "All":
+            df_filtered = df_filtered[df_filtered['Symbol'] == symbol_filter]
+        df_filtered = df_filtered[df_filtered['Realized PNL'] >= float(min_pnl)]
+        if df_filtered.empty:
+            st.info("No trades match the filter criteria.")
+        else:
+            st.dataframe(df_filtered.drop(columns=['Timestamp_dt']).sort_values(by="Timestamp", ascending=False), use_container_width=True)
+            csv = df_filtered.drop(columns=['Timestamp_dt']).to_csv(index=False).encode('utf-8')
+            st.download_button("Download Filtered CSV", csv, file_name="trade_log_filtered.csv", mime="text/csv")
+            if st.button("Clear Trade Log"):
+                st.session_state.executed_trades = []
+                st.success("Trade log cleared.")
     else:
         st.info("No trades in log yet.")
 
 def tab_live_chart():
     st.header("📊 Live Chart")
-    st.markdown("Live chart updates independently. You can adjust the chart refresh interval in the sidebar.")
+    st.markdown("Live chart updates independently. Use the sidebar to adjust the chart refresh interval.")
     sym = st.session_state.selected_symbol
-    if st.session_state.auto_refresh:
-        # ensure an independent ref to force rerender
-        st.session_state.live_chart_ref += 1
-        # autorefresh for chart specifically - use smaller interval if desired
-        st_autorefresh(interval=st.session_state.refresh_interval * 1000, key=f"live_chart_{st.session_state.live_chart_ref}")
+    if st.session_state.chart_refresh_interval and st.session_state.chart_refresh_interval > 0:
+        st_autorefresh(interval=st.session_state.chart_refresh_interval * 1000, key=f"live_chart_{sym}_{st.session_state.live_chart_ref}")
     df = fetch_data_yf(sym, period="1d", interval="5m")
     df = calculate_indicators(df)
-    plot_candlestick_with_indicators(sym, df, height=650)
+    plot_candlestick_with_indicators(sym, df, height=700)
 
 # -------------------------
 # 10. MAIN
 # -------------------------
 def main():
     inject_css()
-    st.markdown("<h1 class='main-header'>📈 Intraday Options Trading Terminal (Paper)</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 class='main-header'>📈 Intraday Options Trading Terminal (Paper) — FINAL</h1>", unsafe_allow_html=True)
     sidebar_controls()
 
-    # Auto refresh engine (generates signals + optional auto-execute)
+    # Engine auto refresh (signals + optional auto-execute)
     if st.session_state.auto_refresh:
         st_autorefresh(interval=st.session_state.refresh_interval * 1000, key="global_refresher")
         generate_all_signals()
@@ -486,6 +596,14 @@ def main():
         tab_trade_log()
     with main_tabs[3]:
         tab_live_chart()
+
+    # Play beep if a new execution happened since last render
+    # Keep track of execution count and render beep when increased
+    cur_exec_count = len(st.session_state.execution_logs)
+    if cur_exec_count > st.session_state.prev_execution_count:
+        # render a short beep via JS
+        render_beep_player()
+    st.session_state.prev_execution_count = cur_exec_count
 
     # Footer quick info
     st.markdown("---")
