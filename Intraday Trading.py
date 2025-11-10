@@ -1,5 +1,5 @@
 # gemini_intraday_pro_enhanced.py
-# Enhanced: Multiple strategies, improved RSI (70/30), auto-trading, and better signals
+# Enhanced: Multiple strategies, improved indicators, auto-trading, and better signals
 
 import streamlit as st
 import pandas as pd
@@ -53,6 +53,47 @@ STRATEGIES = {
         "rsi_overbought": 75,
         "rsi_oversold": 25,
         "volume_threshold": 1.5
+    },
+    "MACD_Momentum": {
+        "description": "MACD crossover with volume confirmation",
+        "macd_fast": 12,
+        "macd_slow": 26,
+        "macd_signal": 9,
+        "volume_threshold": 1.2
+    },
+    "RSI_Divergence": {
+        "description": "RSI divergence with price action",
+        "rsi_period": 14,
+        "rsi_overbought": 70,
+        "rsi_oversold": 30,
+        "divergence_lookback": 5
+    },
+    "VWAP_Bollinger": {
+        "description": "VWAP with Bollinger Band breakout",
+        "vwap_period": 20,
+        "bb_period": 20,
+        "bb_std": 2,
+        "volume_threshold": 1.3
+    },
+    "SuperTrend_EMA": {
+        "description": "SuperTrend with EMA confirmation",
+        "atr_period": 10,
+        "atr_multiplier": 3,
+        "ema_period": 21,
+        "volume_threshold": 1.2
+    },
+    "Golden_Cross": {
+        "description": "50/200 EMA Golden Cross strategy",
+        "ema_short": 50,
+        "ema_long": 200,
+        "rsi_period": 14,
+        "volume_threshold": 1.5
+    },
+    "Volume_Spike": {
+        "description": "Volume spike with price breakout",
+        "volume_multiplier": 2.0,
+        "price_breakout": 0.02,
+        "rsi_confirmation": True
     }
 }
 
@@ -169,6 +210,73 @@ def compute_atr(high, low, close, period=14):
     atr = tr.rolling(period).mean()
     return atr
 
+def compute_supertrend(high, low, close, period=10, multiplier=3):
+    """Calculate SuperTrend indicator"""
+    atr = compute_atr(high, low, close, period)
+    hl2 = (high + low) / 2
+    
+    # Basic upper and lower bands
+    upper_band = hl2 + (multiplier * atr)
+    lower_band = hl2 - (multiplier * atr)
+    
+    # Initialize SuperTrend
+    st = pd.Series(index=close.index, dtype=float)
+    trend = pd.Series(index=close.index, dtype=int)
+    
+    for i in range(1, len(close)):
+        if close.iloc[i] > upper_band.iloc[i-1]:
+            st.iloc[i] = lower_band.iloc[i]
+            trend.iloc[i] = 1  # Uptrend
+        elif close.iloc[i] < lower_band.iloc[i-1]:
+            st.iloc[i] = upper_band.iloc[i]
+            trend.iloc[i] = -1  # Downtrend
+        else:
+            st.iloc[i] = st.iloc[i-1]
+            trend.iloc[i] = trend.iloc[i-1]
+            
+    return st, trend
+
+def compute_stochastic(high, low, close, k_period=14, d_period=3):
+    """Calculate Stochastic Oscillator"""
+    lowest_low = low.rolling(window=k_period).min()
+    highest_high = high.rolling(window=k_period).max()
+    
+    k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+    d = k.rolling(window=d_period).mean()
+    
+    return k, d
+
+def compute_obv(close, volume):
+    """Calculate On Balance Volume"""
+    obv = pd.Series(index=close.index, dtype=float)
+    obv.iloc[0] = volume.iloc[0]
+    
+    for i in range(1, len(close)):
+        if close.iloc[i] > close.iloc[i-1]:
+            obv.iloc[i] = obv.iloc[i-1] + volume.iloc[i]
+        elif close.iloc[i] < close.iloc[i-1]:
+            obv.iloc[i] = obv.iloc[i-1] - volume.iloc[i]
+        else:
+            obv.iloc[i] = obv.iloc[i-1]
+    
+    return obv
+
+def compute_volume_profile(volume, price, bins=20):
+    """Calculate Volume Profile"""
+    # Simplified volume profile
+    price_range = price.max() - price.min()
+    bin_size = price_range / bins
+    volume_profile = {}
+    
+    for i in range(len(price)):
+        bin_level = round(price.iloc[i] / bin_size) * bin_size
+        if bin_level in volume_profile:
+            volume_profile[bin_level] += volume.iloc[i]
+        else:
+            volume_profile[bin_level] = volume.iloc[i]
+    
+    return volume_profile
+
 # ---------------------------
 # Data Fetching with Enhanced Indicators
 # ---------------------------
@@ -194,8 +302,11 @@ def compute_enhanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Basic indicators
     df['SMA_20'] = df['Close'].rolling(window=20, min_periods=1).mean()
     df['SMA_50'] = df['Close'].rolling(window=50, min_periods=1).mean()
+    df['SMA_200'] = df['Close'].rolling(window=200, min_periods=1).mean()
     df['EMA_8'] = compute_ema(df['Close'], 8)
     df['EMA_21'] = compute_ema(df['Close'], 21)
+    df['EMA_50'] = compute_ema(df['Close'], 50)
+    df['EMA_200'] = compute_ema(df['Close'], 200)
     
     # Bollinger Bands
     df['BB_MID'] = df['Close'].rolling(window=20, min_periods=1).mean()
@@ -203,10 +314,12 @@ def compute_enhanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['BB_UP'] = df['BB_MID'] + 2 * df['BB_STD']
     df['BB_LO'] = df['BB_MID'] - 2 * df['BB_STD']
     df['BB_WIDTH'] = (df['BB_UP'] - df['BB_LO']) / df['BB_MID']
+    df['BB_POSITION'] = (df['Close'] - df['BB_LO']) / (df['BB_UP'] - df['BB_LO'])
     
     # RSI with multiple periods
     df['RSI_14'] = compute_rsi(df['Close'], 14)
     df['RSI_8'] = compute_rsi(df['Close'], 8)
+    df['RSI_21'] = compute_rsi(df['Close'], 21)
     
     # MACD
     macd, macd_signal, macd_histogram = compute_macd(df['Close'])
@@ -214,25 +327,54 @@ def compute_enhanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['MACD_Signal'] = macd_signal
     df['MACD_Histogram'] = macd_histogram
     
-    # ATR
-    df['ATR'] = compute_atr(df['High'], df['Low'], df['Close'], 10)
+    # ATR and Volatility
+    df['ATR'] = compute_atr(df['High'], df['Low'], df['Close'], 14)
+    df['VOLATILITY'] = df['Close'].pct_change().rolling(window=20).std() * np.sqrt(252) * 100
     
-    # Volume indicators - FIXED: Handle volume column properly
+    # Volume indicators - FIXED: Proper handling of volume calculations
     if 'Volume' in df.columns:
-        df['VOLUME_MA_20'] = df['Volume'].rolling(window=20, min_periods=1).mean()
-        # Ensure we're working with Series, not DataFrames
-        volume_series = df['Volume']
-        volume_ma_series = df['VOLUME_MA_20']
-        df['VOLUME_RATIO'] = volume_series / volume_ma_series
-        df['VOLUME_RATIO'] = df['VOLUME_RATIO'].replace([np.inf, -np.inf], 0).fillna(0)
+        # Convert to series to avoid DataFrame issues
+        volume_series = df['Volume'].copy()
+        df['VOLUME_MA_20'] = volume_series.rolling(window=20, min_periods=1).mean()
+        
+        # Safe volume ratio calculation
+        volume_ma = df['VOLUME_MA_20']
+        volume_ratio = volume_series / volume_ma
+        volume_ratio = volume_ratio.replace([np.inf, -np.inf], 1.0).fillna(1.0)
+        df['VOLUME_RATIO'] = volume_ratio
+        
+        # Additional volume indicators
+        df['VOLUME_MA_50'] = volume_series.rolling(window=50, min_periods=1).mean()
+        df['OBV'] = compute_obv(df['Close'], volume_series)
     else:
         df['Volume'] = 0
         df['VOLUME_MA_20'] = 0
-        df['VOLUME_RATIO'] = 0
+        df['VOLUME_RATIO'] = 1.0
+        df['VOLUME_MA_50'] = 0
+        df['OBV'] = 0
     
     # VWAP (simplified)
     typical_price = (df['High'] + df['Low'] + df['Close']) / 3
     df['VWAP'] = (typical_price * df['Volume']).cumsum() / df['Volume'].cumsum()
+    df['VWAP_DISTANCE'] = (df['Close'] - df['VWAP']) / df['VWAP'] * 100
+    
+    # Stochastic
+    stoch_k, stoch_d = compute_stochastic(df['High'], df['Low'], df['Close'])
+    df['STOCH_K'] = stoch_k
+    df['STOCH_D'] = stoch_d
+    
+    # SuperTrend
+    supertrend, supertrend_trend = compute_supertrend(df['High'], df['Low'], df['Close'])
+    df['SUPERTREND'] = supertrend
+    df['SUPERTREND_TREND'] = supertrend_trend
+    
+    # Price momentum
+    df['MOMENTUM_5'] = df['Close'].pct_change(5) * 100
+    df['MOMENTUM_10'] = df['Close'].pct_change(10) * 100
+    
+    # Support and Resistance levels (simplified)
+    df['RESISTANCE'] = df['High'].rolling(window=20, min_periods=1).max()
+    df['SUPPORT'] = df['Low'].rolling(window=20, min_periods=1).min()
     
     return df
 
@@ -258,6 +400,7 @@ def generate_enhanced_signals(df: pd.DataFrame, strategy_name: str = "SMA_Crosso
         'indicators': {}
     }
     
+    # Strategy-specific signal generation
     if strategy_name == "SMA_Crossover_Enhanced":
         signal = sma_crossover_strategy(df, strategy)
     elif strategy_name == "EMA_Momentum":
@@ -266,6 +409,18 @@ def generate_enhanced_signals(df: pd.DataFrame, strategy_name: str = "SMA_Crosso
         signal = bollinger_rsi_strategy(df, strategy)
     elif strategy_name == "Mean_Reversion":
         signal = mean_reversion_strategy(df, strategy)
+    elif strategy_name == "MACD_Momentum":
+        signal = macd_momentum_strategy(df, strategy)
+    elif strategy_name == "RSI_Divergence":
+        signal = rsi_divergence_strategy(df, strategy)
+    elif strategy_name == "VWAP_Bollinger":
+        signal = vwap_bollinger_strategy(df, strategy)
+    elif strategy_name == "SuperTrend_EMA":
+        signal = supertrend_ema_strategy(df, strategy)
+    elif strategy_name == "Golden_Cross":
+        signal = golden_cross_strategy(df, strategy)
+    elif strategy_name == "Volume_Spike":
+        signal = volume_spike_strategy(df, strategy)
     else:
         signal = None
     
@@ -490,6 +645,301 @@ def mean_reversion_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
     
     return None
 
+def macd_momentum_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
+    """MACD Momentum strategy"""
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    macd = _safe_scalar_from_row(latest, 'MACD')
+    macd_signal = _safe_scalar_from_row(latest, 'MACD_Signal')
+    macd_prev = _safe_scalar_from_row(prev, 'MACD')
+    macd_signal_prev = _safe_scalar_from_row(prev, 'MACD_Signal')
+    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
+    
+    # BUY Signal: MACD crosses above signal line
+    if (not math.isnan(macd) and not math.isnan(macd_signal) and
+        not math.isnan(macd_prev) and not math.isnan(macd_signal_prev) and
+        macd > macd_signal and macd_prev <= macd_signal_prev and
+        volume_ratio > strategy["volume_threshold"]):
+        
+        entry = _safe_scalar_from_row(latest, 'Close')
+        confidence = min(0.95, 0.7 + (0.2 if macd > 0 else 0) + (0.1 if volume_ratio > 1.5 else 0))
+        
+        return {
+            'action': 'BUY',
+            'entry': entry,
+            'stop_loss': entry * 0.99,
+            'target1': entry * 1.02,
+            'target2': entry * 1.04,
+            'confidence': confidence,
+            'reason': f"MACD bullish crossover, Volume {volume_ratio:.1f}x"
+        }
+    
+    # SELL Signal: MACD crosses below signal line
+    elif (not math.isnan(macd) and not math.isnan(macd_signal) and
+          not math.isnan(macd_prev) and not math.isnan(macd_signal_prev) and
+          macd < macd_signal and macd_prev >= macd_signal_prev and
+          volume_ratio > strategy["volume_threshold"]):
+        
+        entry = _safe_scalar_from_row(latest, 'Close')
+        confidence = min(0.95, 0.7 + (0.2 if macd < 0 else 0) + (0.1 if volume_ratio > 1.5 else 0))
+        
+        return {
+            'action': 'SELL',
+            'entry': entry,
+            'stop_loss': entry * 1.01,
+            'target1': entry * 0.98,
+            'target2': entry * 0.96,
+            'confidence': confidence,
+            'reason': f"MACD bearish crossover, Volume {volume_ratio:.1f}x"
+        }
+    
+    return None
+
+def rsi_divergence_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
+    """RSI Divergence strategy"""
+    if len(df) < strategy["divergence_lookback"] + 5:
+        return None
+    
+    latest = df.iloc[-1]
+    lookback_data = df.iloc[-strategy["divergence_lookback"]:]
+    
+    rsi = _safe_scalar_from_row(latest, 'RSI_14')
+    price = _safe_scalar_from_row(latest, 'Close')
+    
+    # Find RSI and price extremes in lookback period
+    max_rsi = lookback_data['RSI_14'].max()
+    min_rsi = lookback_data['RSI_14'].min()
+    max_price = lookback_data['Close'].max()
+    min_price = lookback_data['Close'].min()
+    
+    # Bullish divergence: Lower lows in price but higher lows in RSI
+    if (rsi > min_rsi + 5 and price <= min_price and 
+        lookback_data['RSI_14'].iloc[-5] > lookback_data['RSI_14'].iloc[-10] and
+        rsi < strategy["rsi_oversold"] + 10):
+        
+        entry = _safe_scalar_from_row(latest, 'Close')
+        confidence = min(0.95, 0.6 + (0.3 if rsi < 40 else 0))
+        
+        return {
+            'action': 'BUY',
+            'entry': entry,
+            'stop_loss': entry * 0.985,
+            'target1': entry * 1.02,
+            'target2': entry * 1.04,
+            'confidence': confidence,
+            'reason': f"Bullish RSI Divergence, RSI {rsi:.1f}"
+        }
+    
+    # Bearish divergence: Higher highs in price but lower highs in RSI
+    elif (rsi < max_rsi - 5 and price >= max_price and
+          lookback_data['RSI_14'].iloc[-5] < lookback_data['RSI_14'].iloc[-10] and
+          rsi > strategy["rsi_overbought"] - 10):
+        
+        entry = _safe_scalar_from_row(latest, 'Close')
+        confidence = min(0.95, 0.6 + (0.3 if rsi > 60 else 0))
+        
+        return {
+            'action': 'SELL',
+            'entry': entry,
+            'stop_loss': entry * 1.015,
+            'target1': entry * 0.98,
+            'target2': entry * 0.96,
+            'confidence': confidence,
+            'reason': f"Bearish RSI Divergence, RSI {rsi:.1f}"
+        }
+    
+    return None
+
+def vwap_bollinger_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
+    """VWAP with Bollinger Band strategy"""
+    latest = df.iloc[-1]
+    
+    close = _safe_scalar_from_row(latest, 'Close')
+    vwap = _safe_scalar_from_row(latest, 'VWAP')
+    bb_up = _safe_scalar_from_row(latest, 'BB_UP')
+    bb_lo = _safe_scalar_from_row(latest, 'BB_LO')
+    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
+    
+    # BUY Signal: Price above VWAP, near lower Bollinger Band, volume confirmation
+    if (not math.isnan(close) and not math.isnan(vwap) and not math.isnan(bb_lo) and
+        close > vwap and close <= bb_lo * 1.02 and
+        volume_ratio > strategy["volume_threshold"]):
+        
+        confidence = min(0.95, 0.7 + (0.2 if (close - vwap) / vwap > 0.01 else 0) + (0.1 if volume_ratio > 1.5 else 0))
+        
+        return {
+            'action': 'BUY',
+            'entry': close,
+            'stop_loss': min(bb_lo, vwap),
+            'target1': bb_up * 0.95,
+            'target2': bb_up,
+            'confidence': confidence,
+            'reason': f"VWAP support with Bollinger, Volume {volume_ratio:.1f}x"
+        }
+    
+    # SELL Signal: Price below VWAP, near upper Bollinger Band, volume confirmation
+    elif (not math.isnan(close) and not math.isnan(vwap) and not math.isnan(bb_up) and
+          close < vwap and close >= bb_up * 0.98 and
+          volume_ratio > strategy["volume_threshold"]):
+        
+        confidence = min(0.95, 0.7 + (0.2 if (vwap - close) / vwap > 0.01 else 0) + (0.1 if volume_ratio > 1.5 else 0))
+        
+        return {
+            'action': 'SELL',
+            'entry': close,
+            'stop_loss': max(bb_up, vwap),
+            'target1': bb_lo * 1.05,
+            'target2': bb_lo,
+            'confidence': confidence,
+            'reason': f"VWAP resistance with Bollinger, Volume {volume_ratio:.1f}x"
+        }
+    
+    return None
+
+def supertrend_ema_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
+    """SuperTrend with EMA confirmation"""
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    supertrend = _safe_scalar_from_row(latest, 'SUPERTREND')
+    supertrend_trend = _safe_scalar_from_row(latest, 'SUPERTREND_TREND')
+    supertrend_prev = _safe_scalar_from_row(prev, 'SUPERTREND_TREND')
+    ema = _safe_scalar_from_row(latest, 'EMA_21')
+    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
+    close = _safe_scalar_from_row(latest, 'Close')
+    
+    # BUY Signal: SuperTrend turns bullish, price above EMA
+    if (not math.isnan(supertrend_trend) and not math.isnan(supertrend_prev) and
+        supertrend_trend == 1 and supertrend_prev == -1 and
+        not math.isnan(ema) and close > ema and
+        volume_ratio > strategy["volume_threshold"]):
+        
+        confidence = min(0.95, 0.8 + (0.1 if volume_ratio > 1.5 else 0))
+        
+        return {
+            'action': 'BUY',
+            'entry': close,
+            'stop_loss': supertrend,
+            'target1': close * 1.02,
+            'target2': close * 1.04,
+            'confidence': confidence,
+            'reason': f"SuperTrend bullish, above EMA, Volume {volume_ratio:.1f}x"
+        }
+    
+    # SELL Signal: SuperTrend turns bearish, price below EMA
+    elif (not math.isnan(supertrend_trend) and not math.isnan(supertrend_prev) and
+          supertrend_trend == -1 and supertrend_prev == 1 and
+          not math.isnan(ema) and close < ema and
+          volume_ratio > strategy["volume_threshold"]):
+        
+        confidence = min(0.95, 0.8 + (0.1 if volume_ratio > 1.5 else 0))
+        
+        return {
+            'action': 'SELL',
+            'entry': close,
+            'stop_loss': supertrend,
+            'target1': close * 0.98,
+            'target2': close * 0.96,
+            'confidence': confidence,
+            'reason': f"SuperTrend bearish, below EMA, Volume {volume_ratio:.1f}x"
+        }
+    
+    return None
+
+def golden_cross_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
+    """Golden Cross strategy"""
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    ema50 = _safe_scalar_from_row(latest, 'EMA_50')
+    ema200 = _safe_scalar_from_row(latest, 'EMA_200')
+    ema50_prev = _safe_scalar_from_row(prev, 'EMA_50')
+    ema200_prev = _safe_scalar_from_row(prev, 'EMA_200')
+    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
+    
+    # BUY Signal: EMA50 crosses above EMA200 (Golden Cross)
+    if (not math.isnan(ema50) and not math.isnan(ema200) and
+        not math.isnan(ema50_prev) and not math.isnan(ema200_prev) and
+        ema50 > ema200 and ema50_prev <= ema200_prev and
+        volume_ratio > strategy["volume_threshold"]):
+        
+        entry = _safe_scalar_from_row(latest, 'Close')
+        confidence = min(0.95, 0.8 + (0.1 if volume_ratio > 2.0 else 0))
+        
+        return {
+            'action': 'BUY',
+            'entry': entry,
+            'stop_loss': ema200,
+            'target1': entry * 1.03,
+            'target2': entry * 1.06,
+            'confidence': confidence,
+            'reason': f"Golden Cross (EMA50 > EMA200), Volume {volume_ratio:.1f}x"
+        }
+    
+    # SELL Signal: EMA50 crosses below EMA200 (Death Cross)
+    elif (not math.isnan(ema50) and not math.isnan(ema200) and
+          not math.isnan(ema50_prev) and not math.isnan(ema200_prev) and
+          ema50 < ema200 and ema50_prev >= ema200_prev and
+          volume_ratio > strategy["volume_threshold"]):
+        
+        entry = _safe_scalar_from_row(latest, 'Close')
+        confidence = min(0.95, 0.8 + (0.1 if volume_ratio > 2.0 else 0))
+        
+        return {
+            'action': 'SELL',
+            'entry': entry,
+            'stop_loss': ema200,
+            'target1': entry * 0.97,
+            'target2': entry * 0.94,
+            'confidence': confidence,
+            'reason': f"Death Cross (EMA50 < EMA200), Volume {volume_ratio:.1f}x"
+        }
+    
+    return None
+
+def volume_spike_strategy(df: pd.DataFrame, strategy: Dict) -> Optional[Dict]:
+    """Volume Spike strategy"""
+    latest = df.iloc[-1]
+    
+    volume_ratio = _safe_scalar_from_row(latest, 'VOLUME_RATIO')
+    price_change = _safe_scalar_from_row(latest, 'MOMENTUM_5')
+    close = _safe_scalar_from_row(latest, 'Close')
+    
+    # BUY Signal: High volume with positive price breakout
+    if (volume_ratio > strategy["volume_multiplier"] and
+        price_change > strategy["price_breakout"] * 100):
+        
+        confidence = min(0.95, 0.6 + (0.2 if volume_ratio > 3.0 else 0) + (0.2 if price_change > 5 else 0))
+        
+        return {
+            'action': 'BUY',
+            'entry': close,
+            'stop_loss': close * 0.99,
+            'target1': close * 1.02,
+            'target2': close * 1.04,
+            'confidence': confidence,
+            'reason': f"Volume spike {volume_ratio:.1f}x, Price breakout {price_change:.1f}%"
+        }
+    
+    # SELL Signal: High volume with negative price breakout
+    elif (volume_ratio > strategy["volume_multiplier"] and
+          price_change < -strategy["price_breakout"] * 100):
+        
+        confidence = min(0.95, 0.6 + (0.2 if volume_ratio > 3.0 else 0) + (0.2 if price_change < -5 else 0))
+        
+        return {
+            'action': 'SELL',
+            'entry': close,
+            'stop_loss': close * 1.01,
+            'target1': close * 0.98,
+            'target2': close * 0.96,
+            'confidence': confidence,
+            'reason': f"Volume spike {volume_ratio:.1f}x, Price breakdown {price_change:.1f}%"
+        }
+    
+    return None
+
 # ---------------------------
 # Auto-Trading Engine
 # ---------------------------
@@ -644,7 +1094,7 @@ NIFTY_NEXT_50 = [
     "MOTHERSON.NS","ZOMATO.NS","ABB.NS","ADANIPOWER.NS","AMBUJACEM.NS",
     "BANDHANBNK.NS","COLPAL.NS","CONCOR.NS","DABUR.NS","DALBHARAT.NS",
     "GLENMARK.NS","HINDPETRO.NS","IGL.NS","INDUSTOWER.NS","JINDALSTEL.NS",
-    "JSWENERGY.NS","LTI.NS","MANAPPURAM.NS","MCDOWELL-N.NS","NMDC.NS",
+    "JSWENERGY.NS","L&TFH.NS","MANAPPURAM.NS","MCDOWELL-N.NS","NMDC.NS",
     "PETRONET.NS","SIEMENS.NS","UBL.NS","VOLTAS.NS","YESBANK.NS"
 ]
 
@@ -686,6 +1136,18 @@ def main():
     else:
         symbols_to_scan = NIFTY_100
     
+    # Strategy selection for focused scanning
+    st.sidebar.subheader("🎯 Strategy Focus")
+    focus_strategies = st.sidebar.multiselect(
+        "Focus on Strategies (empty = all)",
+        options=list(STRATEGIES.keys()),
+        default=list(STRATEGIES.keys())[:3],
+        help="Select specific strategies to focus on for better performance"
+    )
+    
+    if not focus_strategies:
+        focus_strategies = list(STRATEGIES.keys())
+    
     # Auto-Trading Configuration
     st.sidebar.subheader("🤖 Auto-Trading Settings")
     auto_trade_enabled = st.sidebar.checkbox("Enable Auto-Trading", value=False)
@@ -714,10 +1176,10 @@ def main():
     tabs = st.tabs(["📊 Dashboard", "🎯 Multi-Strategy Signals", "🤖 Auto-Trade", "📈 Live Charts", "📝 Paper Trading", "📊 Backtest"])
     
     with tabs[0]:
-        show_dashboard(symbols_to_scan)
+        show_dashboard(symbols_to_scan, focus_strategies)
     
     with tabs[1]:
-        show_multi_strategy_signals(symbols_to_scan)
+        show_multi_strategy_signals(symbols_to_scan, focus_strategies)
     
     with tabs[2]:
         show_auto_trading()
@@ -731,7 +1193,7 @@ def main():
     with tabs[5]:
         show_backtest()
 
-def show_dashboard(symbols_to_scan):
+def show_dashboard(symbols_to_scan, focus_strategies):
     st.header("📊 Professional Trading Dashboard")
     
     # Market Overview
@@ -739,7 +1201,7 @@ def show_dashboard(symbols_to_scan):
     with col1:
         st.metric("Symbols Scanning", len(symbols_to_scan))
     with col2:
-        st.metric("Strategies Active", len(STRATEGIES))
+        st.metric("Strategies Active", len(focus_strategies))
     with col3:
         st.metric("Auto-Trading", "🟢 Enabled" if st.session_state.auto_trade_config.enabled else "🔴 Disabled")
     with col4:
@@ -748,73 +1210,97 @@ def show_dashboard(symbols_to_scan):
     # Quick scan with all strategies
     st.subheader("🚀 Multi-Strategy Market Scan")
     
-    if st.button("Run Comprehensive Scan") or True:  # Auto-run on refresh
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+    # Auto-run scan on refresh
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    all_signals = []
+    signals_by_strategy = {strategy: [] for strategy in focus_strategies}
+    
+    for i, symbol in enumerate(symbols_to_scan):
+        status_text.text(f"Scanning {i+1}/{len(symbols_to_scan)}: {symbol}")
+        df = fetch_enhanced_ohlc(symbol)
         
-        all_signals = []
-        for i, symbol in enumerate(symbols_to_scan):
-            status_text.text(f"Scanning {i+1}/{len(symbols_to_scan)}: {symbol}")
-            df = fetch_enhanced_ohlc(symbol)
-            
-            # Test all strategies for each symbol
-            for strategy_name in STRATEGIES.keys():
-                signal = generate_enhanced_signals(df, strategy_name)
-                if signal:
-                    signal['symbol'] = symbol
-                    all_signals.append(signal)
-            
-            progress_bar.progress((i + 1) / len(symbols_to_scan))
+        # Test all focused strategies for each symbol
+        for strategy_name in focus_strategies:
+            signal = generate_enhanced_signals(df, strategy_name)
+            if signal:
+                signal['symbol'] = symbol
+                all_signals.append(signal)
+                signals_by_strategy[strategy_name].append(signal)
         
-        progress_bar.empty()
-        status_text.empty()
+        progress_bar.progress((i + 1) / len(symbols_to_scan))
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    # Update last refresh time
+    st.session_state.last_refresh = datetime.now()
+    
+    if all_signals:
+        # Display top signals by confidence
+        st.subheader("🎯 Top Trading Signals")
+        top_signals = sorted(all_signals, key=lambda x: x['confidence'], reverse=True)[:20]
+        display_enhanced_signals(top_signals)
         
-        # Update last refresh time
-        st.session_state.last_refresh = datetime.now()
+        # Strategy performance summary
+        st.subheader("📈 Strategy Performance Summary")
+        strategy_stats = []
+        for strategy, signals in signals_by_strategy.items():
+            if signals:
+                avg_confidence = np.mean([s['confidence'] for s in signals])
+                buy_signals = len([s for s in signals if s['action'] == 'BUY'])
+                sell_signals = len([s for s in signals if s['action'] == 'SELL'])
+                strategy_stats.append({
+                    'Strategy': strategy,
+                    'Total Signals': len(signals),
+                    'Buy Signals': buy_signals,
+                    'Sell Signals': sell_signals,
+                    'Avg Confidence': f"{avg_confidence:.2f}"
+                })
         
-        if all_signals:
-            display_enhanced_signals(all_signals)
-        else:
-            st.info("No signals found in current scan.")
+        if strategy_stats:
+            st.dataframe(pd.DataFrame(strategy_stats), use_container_width=True)
+    else:
+        st.info("No signals found in current scan.")
     
     # Market Statistics
-    st.subheader("📈 Market Statistics")
-    col1, col2, col3 = st.columns(3)
+    st.subheader("📊 Market Statistics")
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.metric("NIFTY 50 Stocks", len(NIFTY_50))
     with col2:
         st.metric("NIFTY 100 Stocks", len(NIFTY_100))
     with col3:
-        st.metric("Active Strategies", len(STRATEGIES))
+        st.metric("Total Strategies", len(STRATEGIES))
+    with col4:
+        st.metric("Active Focus", len(focus_strategies))
 
-def show_multi_strategy_signals(symbols_to_scan):
+def show_multi_strategy_signals(symbols_to_scan, focus_strategies):
     st.header("🎯 Multi-Strategy Signal Scanner")
     
-    # Strategy performance overview
-    st.subheader("Strategy Performance Overview")
-    
     # Run multi-strategy scan
-    if st.button("Generate Multi-Strategy Signals"):
-        signals_by_strategy = {strategy: [] for strategy in STRATEGIES.keys()}
-        
-        progress_bar = st.progress(0)
-        for i, symbol in enumerate(symbols_to_scan):
-            df = fetch_enhanced_ohlc(symbol)
-            if df is not None:
-                for strategy_name in STRATEGIES.keys():
-                    signal = generate_enhanced_signals(df, strategy_name)
-                    if signal:
-                        signal['symbol'] = symbol
-                        signals_by_strategy[strategy_name].append(signal)
-            progress_bar.progress((i + 1) / len(symbols_to_scan))
-        progress_bar.empty()
-        
-        # Display signals by strategy
-        for strategy_name, signals in signals_by_strategy.items():
-            if signals:
-                st.subheader(f"📊 {strategy_name} Signals")
-                display_enhanced_signals(signals)
+    signals_by_strategy = {strategy: [] for strategy in focus_strategies}
+    
+    progress_bar = st.progress(0)
+    for i, symbol in enumerate(symbols_to_scan):
+        df = fetch_enhanced_ohlc(symbol)
+        if df is not None:
+            for strategy_name in focus_strategies:
+                signal = generate_enhanced_signals(df, strategy_name)
+                if signal:
+                    signal['symbol'] = symbol
+                    signals_by_strategy[strategy_name].append(signal)
+        progress_bar.progress((i + 1) / len(symbols_to_scan))
+    progress_bar.empty()
+    
+    # Display signals by strategy
+    for strategy_name, signals in signals_by_strategy.items():
+        if signals:
+            st.subheader(f"📊 {strategy_name} Signals")
+            st.write(f"**Description:** {STRATEGIES[strategy_name]['description']}")
+            display_enhanced_signals(signals)
 
 def display_enhanced_signals(signals):
     """Display enhanced signals with better formatting"""
@@ -823,7 +1309,7 @@ def display_enhanced_signals(signals):
         
     df_signals = pd.DataFrame([{
         'Symbol': s['symbol'],
-        'Action': s['action'],
+        'Action': '🟢 BUY' if s['action'] == 'BUY' else '🔴 SELL',
         'Strategy': s['strategy'],
         'Entry': f"₹{s['entry']:.2f}",
         'SL': f"₹{s['stop_loss']:.2f}",
@@ -834,7 +1320,14 @@ def display_enhanced_signals(signals):
         'Time': s['timestamp'].strftime("%H:%M:%S")
     } for s in signals])
     
-    st.dataframe(df_signals.sort_values('Confidence', ascending=False), use_container_width=True)
+    # Style the dataframe
+    styled_df = df_signals.style.background_gradient(
+        subset=['Confidence'], cmap='RdYlGn'
+    ).format({
+        'Confidence': '{:.2f}'
+    })
+    
+    st.dataframe(styled_df, use_container_width=True, height=400)
     
     # Auto-trade execution
     if st.session_state.auto_trade_config.enabled:
@@ -859,13 +1352,17 @@ def show_auto_trading():
         open_positions = [t for t in st.session_state.auto_trader.trades if t.get('status') == 'OPEN']
         if open_positions:
             for position in open_positions:
-                with st.expander(f"{position['symbol']} {position['action']} - ₹{position['entry_price']:.2f}"):
-                    st.write(f"**Entry:** ₹{position['entry_price']:.2f}")
-                    st.write(f"**Stop Loss:** ₹{position['stop_loss']:.2f}")
-                    st.write(f"**Target 1:** ₹{position['target1']:.2f}")
-                    st.write(f"**Target 2:** ₹{position['target2']:.2f}")
-                    st.write(f"**Quantity:** {position['quantity']}")
-                    st.write(f"**Confidence:** {position['confidence']:.2f}")
+                with st.expander(f"{position['symbol']} {position['action']} - ₹{position['entry_price']:.2f}", expanded=True):
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.metric("Entry Price", f"₹{position['entry_price']:.2f}")
+                        st.metric("Stop Loss", f"₹{position['stop_loss']:.2f}")
+                        st.metric("Quantity", position['quantity'])
+                    with col_b:
+                        st.metric("Target 1", f"₹{position['target1']:.2f}")
+                        st.metric("Target 2", f"₹{position['target2']:.2f}")
+                        st.metric("Confidence", f"{position['confidence']:.2f}")
+                    
                     st.write(f"**Strategy:** {position['strategy']}")
                     st.write(f"**Reason:** {position['reason']}")
                     
@@ -876,7 +1373,8 @@ def show_auto_trading():
                     else:
                         pnl = (position['entry_price'] - current_price) * position['quantity']
                     
-                    st.write(f"**Current P&L:** ₹{pnl:.2f}")
+                    pnl_color = "green" if pnl > 0 else "red"
+                    st.write(f"**Current P&L:** :{pnl_color}[₹{pnl:.2f}]")
         else:
             st.info("No open positions")
     
@@ -888,12 +1386,21 @@ def show_auto_trading():
             recent_trades = closed_trades[-10:]
             for trade in recent_trades:
                 pnl_color = "green" if trade.get('pnl', 0) > 0 else "red"
-                st.write(f"{trade['symbol']} {trade['action']} - P&L: ₹{trade.get('pnl', 0):.2f} - {trade.get('exit_reason', '')}")
+                with st.expander(f"{trade['symbol']} {trade['action']} - P&L: ₹{trade.get('pnl', 0):.2f}"):
+                    st.write(f"**Entry:** ₹{trade['entry_price']:.2f}")
+                    st.write(f"**Exit:** ₹{trade.get('exit_price', 0):.2f}")
+                    st.write(f"**Reason:** {trade.get('exit_reason', 'N/A')}")
+                    st.write(f"**Strategy:** {trade['strategy']}")
             
             total_pnl = sum(t.get('pnl', 0) for t in closed_trades)
-            win_rate = len([t for t in closed_trades if t.get('pnl', 0) > 0]) / len(closed_trades) * 100
-            st.metric("Total P&L", f"₹{total_pnl:.2f}")
-            st.metric("Win Rate", f"{win_rate:.1f}%")
+            win_trades = len([t for t in closed_trades if t.get('pnl', 0) > 0])
+            win_rate = (win_trades / len(closed_trades)) * 100 if closed_trades else 0
+            
+            col_x, col_y = st.columns(2)
+            with col_x:
+                st.metric("Total P&L", f"₹{total_pnl:.2f}")
+            with col_y:
+                st.metric("Win Rate", f"{win_rate:.1f}%")
         else:
             st.info("No trade history")
 
@@ -905,8 +1412,8 @@ def show_live_charts(symbols_to_scan):
     with col1:
         selected_symbol = st.selectbox("Select Symbol", options=symbols_to_scan)
         chart_type = st.selectbox("Chart Type", ["Candlestick", "Line"])
-        indicator1 = st.selectbox("Indicator 1", ["SMA", "EMA", "Bollinger Bands", "None"])
-        indicator2 = st.selectbox("Indicator 2", ["RSI", "MACD", "Volume", "None"])
+        indicator1 = st.selectbox("Primary Indicator", ["SMA", "EMA", "Bollinger Bands", "VWAP", "None"])
+        indicator2 = st.selectbox("Secondary Indicator", ["RSI", "MACD", "Volume", "Stochastic", "None"])
     
     with col2:
         if selected_symbol:
@@ -920,7 +1427,8 @@ def plot_enhanced_chart(df, symbol, chart_type="Candlestick", indicator1="SMA", 
     
     if chart_type == "Candlestick":
         fig.add_trace(go.Candlestick(
-            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'
+            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], 
+            name='Price', increasing_line_color='green', decreasing_line_color='red'
         ))
     else:
         fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Price', line=dict(color='blue')))
@@ -936,9 +1444,11 @@ def plot_enhanced_chart(df, symbol, chart_type="Candlestick", indicator1="SMA", 
         fig.add_trace(go.Scatter(x=df.index, y=df['BB_UP'], name='BB Upper', line=dict(dash='dash', color='gray')))
         fig.add_trace(go.Scatter(x=df.index, y=df['BB_LO'], name='BB Lower', line=dict(dash='dash', color='gray')))
         fig.add_trace(go.Scatter(x=df.index, y=df['BB_MID'], name='BB Middle', line=dict(color='blue')))
+    elif indicator1 == "VWAP":
+        fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], name='VWAP', line=dict(color='purple')))
     
     fig.update_layout(
-        title=f"{symbol} - Live Chart",
+        title=f"{symbol} - Live Chart with {indicator1}",
         xaxis_rangeslider_visible=False,
         height=400
     )
@@ -951,16 +1461,24 @@ def plot_enhanced_chart(df, symbol, chart_type="Candlestick", indicator1="SMA", 
         
         if indicator2 == "RSI":
             fig2.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name='RSI 14', line=dict(color='purple')))
-            fig2.add_hline(y=70, line_dash="dash", line_color="red")
-            fig2.add_hline(y=30, line_dash="dash", line_color="green")
-            fig2.update_layout(title="RSI (14)", height=200)
+            fig2.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought")
+            fig2.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
+            fig2.update_layout(title="RSI (14)", height=200, yaxis_range=[0, 100])
         elif indicator2 == "MACD":
             fig2.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', line=dict(color='blue')))
             fig2.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal', line=dict(color='red')))
+            fig2.add_bar(x=df.index, y=df['MACD_Histogram'], name='Histogram', marker_color='gray')
             fig2.update_layout(title="MACD", height=200)
         elif indicator2 == "Volume":
-            fig2.add_trace(go.Bar(x=df.index, y=df['Volume'], name='Volume'))
+            colors = ['red' if row['Open'] > row['Close'] else 'green' for index, row in df.iterrows()]
+            fig2.add_trace(go.Bar(x=df.index, y=df['Volume'], name='Volume', marker_color=colors))
             fig2.update_layout(title="Volume", height=200)
+        elif indicator2 == "Stochastic":
+            fig2.add_trace(go.Scatter(x=df.index, y=df['STOCH_K'], name='%K', line=dict(color='blue')))
+            fig2.add_trace(go.Scatter(x=df.index, y=df['STOCH_D'], name='%D', line=dict(color='red')))
+            fig2.add_hline(y=80, line_dash="dash", line_color="red")
+            fig2.add_hline(y=20, line_dash="dash", line_color="green")
+            fig2.update_layout(title="Stochastic Oscillator", height=200, yaxis_range=[0, 100])
         
         st.plotly_chart(fig2, use_container_width=True)
 
@@ -977,11 +1495,11 @@ def show_paper_trading(symbols_to_scan):
         
         # Quick trade panel
         st.subheader("⚡ Quick Trade")
-        quick_symbol = st.selectbox("Symbol", symbols_to_scan[:20])
-        quick_action = st.selectbox("Action", ["BUY", "SELL"])
-        quick_quantity = st.number_input("Quantity", min_value=1, max_value=1000, value=10)
+        quick_symbol = st.selectbox("Symbol", symbols_to_scan[:20], key="paper_trade_symbol")
+        quick_action = st.selectbox("Action", ["BUY", "SELL"], key="paper_trade_action")
+        quick_quantity = st.number_input("Quantity", min_value=1, max_value=1000, value=10, key="paper_trade_quantity")
         
-        if st.button("Execute Paper Trade"):
+        if st.button("Execute Paper Trade", key="paper_trade_execute"):
             # Get current price
             df = fetch_enhanced_ohlc(quick_symbol)
             if df is not None:
@@ -990,14 +1508,16 @@ def show_paper_trading(symbols_to_scan):
                     quick_symbol, quick_action, quick_quantity, current_price, "Manual", "Manual trade"
                 ):
                     st.success(f"Paper trade executed: {quick_action} {quick_quantity} {quick_symbol} at ₹{current_price:.2f}")
+                    st.rerun()
     
     with col2:
         st.subheader("📊 Open Positions")
         if st.session_state.paper_trading.positions:
             for symbol, position in st.session_state.paper_trading.positions.items():
-                with st.expander(f"{symbol} {position['action']}"):
+                with st.expander(f"{symbol} {position['action']} - ₹{position['entry_price']:.2f}"):
                     st.write(f"**Entry Price:** ₹{position['entry_price']:.2f}")
                     st.write(f"**Quantity:** {position['quantity']}")
+                    st.write(f"**Investment:** ₹{position['entry_price'] * position['quantity']:.2f}")
                     st.write(f"**Strategy:** {position['strategy']}")
                     st.write(f"**Reason:** {position['reason']}")
                     
@@ -1017,7 +1537,13 @@ def show_paper_trading(symbols_to_scan):
             recent_trades = st.session_state.paper_trading.trade_history[-5:]
             for trade in recent_trades:
                 pnl_color = "green" if trade['pnl'] > 0 else "red"
-                st.write(f"{trade['symbol']} {trade['action']} - P&L: ₹{trade['pnl']:.2f}")
+                with st.expander(f"{trade['symbol']} {trade['action']} - P&L: ₹{trade['pnl']:.2f}"):
+                    st.write(f"**Entry:** ₹{trade['entry_price']:.2f}")
+                    st.write(f"**Exit:** ₹{trade['exit_price']:.2f}")
+                    st.write(f"**Reason:** {trade['exit_reason']}")
+                    st.write(f"**Strategy:** {trade['strategy']}")
+        else:
+            st.info("No trade history")
 
 def show_backtest():
     st.header("📊 Enhanced Backtest")
@@ -1030,15 +1556,18 @@ def show_backtest():
         st.selectbox("Strategy", list(STRATEGIES.keys()))
         st.selectbox("Time Period", ["1 Month", "3 Months", "6 Months", "1 Year"])
         st.number_input("Initial Capital", value=100000)
+        st.selectbox("Risk Management", ["Fixed", "Dynamic", "Kelly Criterion"])
     
     with col2:
         st.subheader("Backtest Results")
         st.write("Comprehensive backtesting across multiple strategies and time periods will be available in the next update.")
-        st.write("Features include:")
+        st.write("**Planned Features:**")
         st.write("• Multi-strategy performance comparison")
-        st.write("• Risk-adjusted return metrics")
-        st.write("• Drawdown analysis")
-        st.write("• Portfolio optimization")
+        st.write("• Risk-adjusted return metrics (Sharpe, Sortino)")
+        st.write("• Drawdown analysis and recovery periods")
+        st.write("• Portfolio optimization and correlation analysis")
+        st.write("• Walk-forward optimization")
+        st.write("• Monte Carlo simulation")
 
 if __name__ == "__main__":
     main()
