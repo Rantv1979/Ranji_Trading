@@ -1,5 +1,5 @@
 # gemini_intraday_pro_final.py
-# Professional Web Trading Terminal Version
+# Professional Web Trading Terminal Version (updated: auto-scan 10s, chart refresh 5s, paper capital 5 Lac)
 
 import streamlit as st
 import pandas as pd
@@ -205,12 +205,13 @@ class AutoTradeConfig:
         self.email_notifications = True
 
 # ---------------------------
-# Paper Trading Configuration
+# Paper Trading Configuration (initial capital updated to 5 Lac)
 # ---------------------------
 class PaperTrading:
     def __init__(self):
-        self.initial_capital = 100000
-        self.available_capital = 100000
+        # Set initial capital to ₹500,000 (5 Lakh)
+        self.initial_capital = 500000.0
+        self.available_capital = 500000.0
         self.positions = {}
         self.trade_history = []
         self.total_pnl = 0
@@ -888,8 +889,10 @@ def main():
         st.session_state.total_scans = 0
     if 'total_signals' not in st.session_state:
         st.session_state.total_signals = 0
+    if 'last_signal_scan' not in st.session_state:
+        st.session_state.last_signal_scan = datetime.min.replace(tzinfo=INDIAN_TIMEZONE)
     
-    # Auto refresh every 10 seconds
+    # Auto refresh every 10 seconds (signals will run per refresh)
     st_autorefresh(interval=10000, key="auto_refresh")
     
     # Sidebar Configuration
@@ -947,7 +950,7 @@ def main():
         st.subheader("📝 Paper Trading")
         if st.button("Reset Paper Trading"):
             st.session_state.paper_trading = PaperTrading()
-            st.success("Paper trading reset!")
+            st.success("Paper trading reset! (Initial capital set to ₹500,000)")
         
         # Quick Stats
         st.subheader("📈 Quick Stats")
@@ -990,7 +993,7 @@ def show_dashboard(symbols_to_scan, focus_strategies):
     with col4:
         st.metric("Last Scan", st.session_state.last_refresh.strftime("%H:%M:%S"))
     
-    # Auto-scan on dashboard load
+    # Auto-scan on dashboard load (manual button retained)
     st.subheader("🚀 Real-time Market Scan")
     
     if st.button("Run Market Scan", type="primary"):
@@ -1057,39 +1060,64 @@ def show_dashboard(symbols_to_scan, focus_strategies):
         st.metric("Signal Hit Rate", f"{hit_rate:.1f}%")
 
 def show_live_signals(symbols_to_scan, focus_strategies):
-    st.header("🎯 Live Trading Signals")
+    st.header("🎯 Live Trading Signals (Auto-scan every 10s)")
+    st.write("Signals will re-run automatically every 10 seconds (app refresh).")
     
-    if st.button("Run Signal Scan", type="primary"):
-        with st.spinner("Scanning for signals..."):
-            all_signals = []
-            
+    # Manual scan button still available
+    manual_scan = st.button("Run Signal Scan Now", type="primary")
+    
+    # Run scan automatically when autorefresh triggers (or manual button clicked)
+    now = get_local_time()
+    last_scan = st.session_state.get('last_signal_scan', datetime.min.replace(tzinfo=INDIAN_TIMEZONE))
+    seconds_since_last = (now - last_scan).total_seconds()
+    
+    should_scan = False
+    # If manual button clicked -> scan
+    if manual_scan:
+        should_scan = True
+    # If at least 9 seconds passed since last auto scan -> scan (auto refresh is 10s)
+    elif seconds_since_last >= 9:
+        should_scan = True
+    
+    all_signals = []
+    if should_scan:
+        st.session_state.last_signal_scan = now
+        with st.spinner("Scanning for signals across the universe..."):
+            total_scanned = 0
             for symbol in symbols_to_scan:
                 df = fetch_enhanced_ohlc(symbol)
+                total_scanned += 1
                 if df is not None:
                     for strategy_name in focus_strategies:
                         signal = generate_enhanced_signals(df, strategy_name)
                         if signal:
                             signal['symbol'] = symbol
                             all_signals.append(signal)
-            
-            if all_signals:
-                st.success(f"Found {len(all_signals)} signals!")
-                display_signals_table(all_signals)
-                
-                # Auto-trade execution
-                if st.session_state.auto_trade_config.enabled:
-                    st.subheader("🤖 Auto-Trade Execution")
-                    executed_trades = 0
-                    for signal in sorted(all_signals, key=lambda x: x['confidence'], reverse=True):
-                        if signal['confidence'] >= st.session_state.auto_trade_config.min_confidence:
-                            if st.session_state.auto_trader.execute_trade(signal, st.session_state.auto_trade_config):
-                                st.success(f"Auto-trade executed: {signal['symbol']} {signal['action']}")
-                                executed_trades += 1
-                                if executed_trades >= st.session_state.auto_trade_config.max_trades_per_day:
-                                    st.warning("Daily trade limit reached")
-                                    break
-            else:
-                st.warning("No signals found. Try adjusting strategy parameters.")
+            st.session_state.total_scans += total_scanned
+            st.session_state.total_signals += len(all_signals)
+            st.session_state.last_refresh = get_local_time()
+    
+    if all_signals:
+        st.success(f"Found {len(all_signals)} signals!")
+        display_signals_table(all_signals)
+        
+        # Auto-trade execution (if enabled)
+        if st.session_state.auto_trade_config.enabled:
+            st.subheader("🤖 Auto-Trade Execution")
+            executed_trades = 0
+            for signal in sorted(all_signals, key=lambda x: x['confidence'], reverse=True):
+                if signal['confidence'] >= st.session_state.auto_trade_config.min_confidence:
+                    if st.session_state.auto_trader.execute_trade(signal, st.session_state.auto_trade_config):
+                        st.success(f"Auto-trade executed: {signal['symbol']} {signal['action']}")
+                        executed_trades += 1
+                        if executed_trades >= st.session_state.auto_trade_config.max_trades_per_day:
+                            st.warning("Daily trade limit reached")
+                            break
+    else:
+        if should_scan:
+            st.info("No signals found this scan.")
+        else:
+            st.info("Waiting for auto-scan...")
 
 def display_signals_table(signals):
     """Display signals in a formatted table"""
@@ -1150,7 +1178,11 @@ def show_auto_trading():
             st.info("No trade history")
 
 def show_charts(symbols_to_scan):
-    st.header("📈 Live Charts")
+    st.header("📈 Live Charts (refresh every 5s)")
+    st.write("Chart updates independently every 5 seconds.")
+    
+    # Chart-specific autorefresh (5 seconds)
+    st_autorefresh(interval=5000, key="chart_refresh")
     
     selected_symbol = st.selectbox("Select Symbol", symbols_to_scan)
     
@@ -1163,8 +1195,9 @@ def show_charts(symbols_to_scan):
                 x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
                 name='Price'
             ))
-            fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(color='orange')))
-            fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50', line=dict(color='blue')))
+            # keep plotly color choices default to avoid hard-coded colors for accessibility
+            fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20'))
+            fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50'))
             fig.update_layout(
                 title=f"{selected_symbol} Price Chart",
                 height=400,
@@ -1176,21 +1209,23 @@ def show_charts(symbols_to_scan):
             col1, col2 = st.columns(2)
             with col1:
                 fig_rsi = go.Figure()
-                fig_rsi.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name='RSI', line=dict(color='purple')))
-                fig_rsi.add_hline(y=70, line_dash="dash", line_color="red")
-                fig_rsi.add_hline(y=30, line_dash="dash", line_color="green")
+                fig_rsi.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name='RSI'))
+                fig_rsi.add_hline(y=70, line_dash="dash")
+                fig_rsi.add_hline(y=30, line_dash="dash")
                 fig_rsi.update_layout(title="RSI (14)", height=300)
                 st.plotly_chart(fig_rsi, use_container_width=True)
             
             with col2:
                 fig_macd = go.Figure()
-                fig_macd.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', line=dict(color='blue')))
-                fig_macd.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal', line=dict(color='red')))
+                fig_macd.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD'))
+                fig_macd.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal'))
                 fig_macd.update_layout(title="MACD", height=300)
                 st.plotly_chart(fig_macd, use_container_width=True)
+        else:
+            st.warning("Couldn't fetch data for the selected symbol (maybe market closed or data not available).")
 
 def show_paper_trading(symbols_to_scan):
-    st.header("📝 Paper Trading")
+    st.header("📝 Paper Trading (Initial capital: ₹500,000)")
     
     col1, col2 = st.columns(2)
     
@@ -1217,7 +1252,7 @@ def show_paper_trading(symbols_to_scan):
                             current_price = df['Close'].iloc[-1]
                             st.session_state.paper_trading.close_trade(symbol, current_price, "Manual Close")
                             st.success(f"Closed {symbol} at ₹{current_price:.2f}")
-                            st.rerun()
+                            st.experimental_rerun()
         else:
             st.info("No open positions")
 
