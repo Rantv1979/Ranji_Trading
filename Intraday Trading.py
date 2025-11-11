@@ -33,11 +33,12 @@ AUTO_EXEC_CONF = 0.60
 NIFTY_50 = [s+".NS" for s in [
     "RELIANCE","TCS","HDFCBANK","INFY","HINDUNILVR","ICICIBANK","KOTAKBANK","BHARTIARTL","ITC","LT",
     "SBIN","ASIANPAINT","HCLTECH","AXISBANK","MARUTI","SUNPHARMA","TITAN","ULTRACEMCO","WIPRO",
-    "NTPC","NESTLEIND","POWERGRID","M&M","BAJFINANCE","ONGC","TATAMOTORS","TATASTEEL","JSWSTEEL",
+    "NTPC","NESTLEIND","POWERGRID","M&M","BAJFINANCE","ONGC","TATASTEEL","JSWSTEEL",
     "ADANIPORTS","COALINDIA","HDFCLIFE","DRREDDY","HINDALCO","CIPLA","SBILIFE","GRASIM","TECHM",
     "BAJAJFINSV","BRITANNIA","EICHERMOT","DIVISLAB","SHREECEM","APOLLOHOSP","UPL","BAJAJ-AUTO",
-    "HEROMOTOCO","INDUSINDBK","ADANIENT","HDFC"
+    "HEROMOTOCO","INDUSINDBK","ADANIENT"
 ]]
+# Remove problematic symbols that are delisted
 NIFTY_NEXT_50 = [s+".NS" for s in [
     "ABB","ADANIGREEN","BANKBARODA","BEL","CANBK","CHOLAFIN","DABUR","GAIL","HAL","IOC",
     "JINDALSTEL","PIDILITIND","PNB","TORNTPOWER","VOLTAS","ICICIPRULI","MUTHOOTFIN","COLPAL","DMART"
@@ -47,12 +48,16 @@ NIFTY_500 = NIFTY_100  # extend if needed
 
 # ---------------- Helpers ----------------
 def now_indian(): return datetime.now(IND_TZ)
+
 def market_open():
-    n = now_indian(); o = IND_TZ.localize(datetime.combine(n.date(), dt_time(9,15)))
+    n = now_indian()
+    # Create timezone-aware datetime objects
+    o = IND_TZ.localize(datetime.combine(n.date(), dt_time(9,15)))
     c = IND_TZ.localize(datetime.combine(n.date(), dt_time(15,30)))
     return o <= n <= c
 
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
+
 def rsi(close, n=14):
     diff = close.diff()
     gain = diff.clip(lower=0).rolling(n).mean()
@@ -72,7 +77,9 @@ def fetch_ohlc(sym, period="1d", interval="5m"):
         df["SMA20"], df["SMA50"] = df["Close"].rolling(20).mean(), df["Close"].rolling(50).mean()
         df["RSI14"] = rsi(df["Close"]).fillna(50)
         return df
-    except: return None
+    except Exception as e:
+        print(f"Error fetching data for {sym}: {e}")
+        return None
 
 def signal(df,sym):
     if df is None or len(df)<3: return None
@@ -155,13 +162,21 @@ tabs=st.tabs(["Dashboard","Signals","Charts","Paper Trading","Trading Log"])
 # --- Dashboard ---
 with tabs[0]:
     col1,col2,col3=st.columns(3)
-    nifty=yf.download("^NSEI",period="1d",interval="1d")
-    bn=yf.download("^NSEBANK",period="1d",interval="1d")
-    n50=nifty["Close"].iloc[-1] if not nifty.empty else None
-    bnk=bn["Close"].iloc[-1] if not bn.empty else None
-    col1.metric("NIFTY 50",f"{n50:.2f}" if n50 else "n/a")
-    col2.metric("BANK NIFTY",f"{bnk:.2f}" if bnk else "n/a")
-    col3.metric("Market", "🟢 OPEN" if market_open() else "🔴 CLOSED")
+    try:
+        nifty=yf.download("^NSEI",period="1d",interval="1d")
+        bn=yf.download("^NSEBANK",period="1d",interval="1d")
+        # FIX: Use .empty to check if DataFrame is empty, not truth value
+        n50_val = nifty["Close"].iloc[-1] if not nifty.empty else None
+        bnk_val = bn["Close"].iloc[-1] if not bn.empty else None
+        
+        col1.metric("NIFTY 50",f"{n50_val:.2f}" if n50_val is not None else "n/a")
+        col2.metric("BANK NIFTY",f"{bnk_val:.2f}" if bnk_val is not None else "n/a")
+        col3.metric("Market", "🟢 OPEN" if market_open() else "🔴 CLOSED")
+    except Exception as e:
+        col1.metric("NIFTY 50", "n/a")
+        col2.metric("BANK NIFTY", "n/a")
+        col3.metric("Market", "🟢 OPEN" if market_open() else "🔴 CLOSED")
+    
     st.write("")
     st.metric("Cash Balance",f"₹{trader.cash:,.0f}")
     st.metric("Total Equity",f"₹{trader.equity():,.0f}")
@@ -189,7 +204,7 @@ with tabs[1]:
         st.info("Market closed. Signals inactive.")
     if sigs:
         df=pd.DataFrame(sigs)
-        st.dataframe(df[["symbol","action","entry","stop","target","conf"]],use_container_width=True)
+        st.dataframe(df[["symbol","action","entry","stop","target","conf"]], width='stretch')
     else:
         st.info("No new signals in this cycle.")
 
@@ -204,7 +219,7 @@ with tabs[2]:
         fig.add_trace(go.Scatter(x=df.index,y=df.SMA20,name="SMA20"))
         fig.add_trace(go.Scatter(x=df.index,y=df.SMA50,name="SMA50"))
         fig.update_layout(title=f"{sym} – 5 min",xaxis_rangeslider_visible=False,height=480)
-        st.plotly_chart(fig,use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
         st.line_chart(df["RSI14"],height=120)
     else:
         st.warning("Data unavailable.")
@@ -214,7 +229,7 @@ with tabs[3]:
     st.write("### Active Positions")
     dfp=trader.positions_df()
     if not dfp.empty:
-        st.dataframe(dfp,use_container_width=True)
+        st.dataframe(dfp, width='stretch')
     else:
         st.info("No open positions.")
     st.write("")
@@ -227,6 +242,6 @@ with tabs[4]:
     if trader.log:
         df=pd.DataFrame(trader.log)
         df["time"]=df["time"].dt.strftime("%H:%M:%S")
-        st.dataframe(df,use_container_width=True)
+        st.dataframe(df, width='stretch')
     else:
         st.info("No trades logged yet.")
