@@ -135,13 +135,29 @@ def fetch_ohlc(sym, period="1d", interval="5m"):
         return None
 
 def get_index_price(symbol):
-    """Get current index price with proper error handling"""
+    """Get current index price with proper error handling and validation"""
     try:
-        data = yf.download(symbol, period="1d", interval="1d", progress=False)
+        # Use ticker object for more reliable data
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period="1d", interval="1d")
+        
         if data is not None and not data.empty:
-            return float(data["Close"].iloc[-1])
-    except:
-        pass
+            current_price = float(data["Close"].iloc[-1])
+            
+            # Validate price range for indices
+            if symbol == "^NSEI":  # Nifty 50
+                if 10000 <= current_price <= 30000:  # Reasonable range for Nifty
+                    return current_price
+            elif symbol == "^NSEBANK":  # Bank Nifty
+                if 20000 <= current_price <= 60000:  # Reasonable range for Bank Nifty
+                    return current_price
+            else:
+                return current_price
+                
+    except Exception as e:
+        print(f"Error fetching index price for {symbol}: {e}")
+    
+    # Fallback: Return None if price is unreasonable or error occurs
     return None
 
 def high_quality_signal(df, sym):
@@ -547,18 +563,41 @@ with tabs[4]:
         log_df = pd.DataFrame(trader.log)
         log_df["time"] = log_df["time"].dt.strftime("%H:%M:%S")
         
-        # Format P&L with colors
+        # Format P&L with colors - FIXED VERSION
         def style_pnl(val):
-            color = 'green' if val > 0 else 'red' if val < 0 else 'black'
-            return f'color: {color}; font-weight: bold;'
+            if val is None:
+                return ''
+            try:
+                if float(val) > 0:
+                    return 'color: green; font-weight: bold;'
+                elif float(val) < 0:
+                    return 'color: red; font-weight: bold;'
+                else:
+                    return 'color: black;'
+            except (ValueError, TypeError):
+                return ''
         
-        styled_df = log_df.style.applymap(style_pnl, subset=['pnl'])
-        st.dataframe(styled_df, width='stretch', hide_index=True)
+        # Apply styling only if 'pnl' column exists - FIXED
+        if not log_df.empty:
+            # Debug information
+            st.write(f"📊 Available Columns: {list(log_df.columns)}")
+            
+            if 'pnl' in log_df.columns:
+                try:
+                    styled_df = log_df.style.applymap(style_pnl, subset=['pnl'])
+                    st.dataframe(styled_df, width='stretch', hide_index=True)
+                except Exception as e:
+                    st.error(f"Error applying styles: {e}")
+                    st.dataframe(log_df, width='stretch', hide_index=True)
+            else:
+                # Display without styling if 'pnl' column is missing
+                st.dataframe(log_df, width='stretch', hide_index=True)
+                st.warning("⚠️ PNL column not available for styling - displaying raw data")
         
         # Export log
         csv = log_df.to_csv(index=False)
         st.download_button(
-            label="Download Trade Log",
+            label="📥 Download Trade Log",
             data=csv,
             file_name=f"trading_log_{datetime.now().strftime('%Y%m%d')}.csv",
             mime="text/csv"
