@@ -29,23 +29,24 @@ IND_TZ = pytz.timezone("Asia/Kolkata")
 # Trading parameters
 CAPITAL = 1_000_000.0
 TRADE_ALLOC = 0.10
-MAX_DAILY_TRADES = 10
+MAX_DAILY_TRADES = 8
 MAX_DRAWDOWN = 0.05
 SECTOR_EXPOSURE_LIMIT = 0.25
 
 # Refresh intervals
-SIGNAL_REFRESH_MS = 10_000
+SIGNAL_REFRESH_MS = 15_000
 CHART_REFRESH_MS = 5_000
 AUTO_EXEC_CONF = 0.70
 
 # ---------------- Complete Nifty Universes ---------------- 
+# Fixed stock list - removed problematic symbols
 NIFTY_50 = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "HINDUNILVR.NS", 
     "ICICIBANK.NS", "KOTAKBANK.NS", "BHARTIARTL.NS", "ITC.NS", "LT.NS",
     "SBIN.NS", "ASIANPAINT.NS", "HCLTECH.NS", "AXISBANK.NS", "MARUTI.NS", 
     "SUNPHARMA.NS", "TITAN.NS", "ULTRACEMCO.NS", "WIPRO.NS", "NTPC.NS",
     "NESTLEIND.NS", "POWERGRID.NS", "M&M.NS", "BAJFINANCE.NS", "ONGC.NS", 
-    "TATAMOTORS.NS", "TATASTEEL.NS", "JSWSTEEL.NS", "ADANIPORTS.NS", "COALINDIA.NS",
+    "TATASTEEL.NS", "JSWSTEEL.NS", "ADANIPORTS.NS", "COALINDIA.NS",
     "HDFCLIFE.NS", "DRREDDY.NS", "HINDALCO.NS", "CIPLA.NS", "SBILIFE.NS", 
     "GRASIM.NS", "TECHM.NS", "BAJAJFINSV.NS", "BRITANNIA.NS", "EICHERMOT.NS",
     "DIVISLAB.NS", "SHREECEM.NS", "APOLLOHOSP.NS", "UPL.NS", "BAJAJ-AUTO.NS",
@@ -66,9 +67,9 @@ NIFTY_NEXT_50 = [
     "NTPC.NS", "ONGC.NS", "PAGEIND.NS", "PEL.NS", "PIDILITIND.NS",
     "PIIND.NS", "PNB.NS", "POLYCAB.NS", "POWERGRID.NS", "RECLTD.NS",
     "RELIANCE.NS", "SAIL.NS", "SBICARD.NS", "SBILIFE.NS", "SHREECEM.NS",
-    "SRF.NS", "SUNPHARMA.NS", "TATACONSUM.NS", "TATAMOTORS.NS", "TATAPOWER.NS",
-    "TATASTEEL.NS", "TCS.NS", "TECHM.NS", "TITAN.NS", "TORNTPHARM.NS",
-    "TRENT.NS", "ULTRACEMCO.NS", "UPL.NS", "VEDANTA.NS", "VOLTAS.NS",
+    "SRF.NS", "SUNPHARMA.NS", "TATACONSUM.NS", "TATAPOWER.NS",
+    "TCS.NS", "TECHM.NS", "TITAN.NS", "TORNTPHARM.NS",
+    "TRENT.NS", "ULTRACEMCO.NS", "UPL.NS", "VOLTAS.NS",
     "WIPRO.NS", "ZOMATO.NS", "ZYDUSLIFE.NS"
 ]
 
@@ -80,10 +81,10 @@ SECTOR_MAP = {
     "BANKING": ["HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS", "SBIN.NS", "AXISBANK.NS", 
                 "INDUSINDBK.NS", "BANDHANBNK.NS", "AUBANK.NS"],
     "IT": ["TCS.NS", "INFY.NS", "WIPRO.NS", "HCLTECH.NS", "TECHM.NS", "MPHASIS.NS"],
-    "AUTO": ["TATAMOTORS.NS", "MARUTI.NS", "M&M.NS", "BAJAJ-AUTO.NS", "EICHERMOT.NS", "HEROMOTOCO.NS"],
+    "AUTO": ["MARUTI.NS", "M&M.NS", "BAJAJ-AUTO.NS", "EICHERMOT.NS", "HEROMOTOCO.NS"],
     "PHARMA": ["SUNPHARMA.NS", "DRREDDY.NS", "CIPLA.NS", "DIVISLAB.NS"],
     "ENERGY": ["RELIANCE.NS", "ONGC.NS", "COALINDIA.NS", "BPCL.NS", "GAIL.NS"],
-    "METALS": ["TATASTEEL.NS", "JSWSTEEL.NS", "HINDALCO.NS", "VEDANTA.NS"],
+    "METALS": ["TATASTEEL.NS", "JSWSTEEL.NS", "HINDALCO.NS"],
     "FMCG": ["HINDUNILVR.NS", "ITC.NS", "NESTLEIND.NS", "BRITANNIA.NS", "DABUR.NS"],
     "INFRA": ["LT.NS", "ADANIPORTS.NS", "ULTRACEMCO.NS", "SHREECEM.NS"]
 }
@@ -135,13 +136,31 @@ def get_sector(symbol):
             return sector
     return "OTHER"
 
+def safe_yf_download(symbol, period="1d", interval="5m", max_retries=2):
+    """Safe Yahoo Finance download with error handling"""
+    for attempt in range(max_retries):
+        try:
+            df = yf.download(symbol, period=period, interval=interval, progress=False, threads=False)
+            if df is not None and not df.empty and len(df) > 10:
+                return df
+            time.sleep(1)  # Brief pause between retries
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed for {symbol}: {e}")
+            time.sleep(1)
+    return None
+
 # ---------------- Enhanced Data Management ----------------
 class DataManager:
     def __init__(self):
         self.cache = {}
         self.last_update = {}
+        self.failed_symbols = set()
     
     def get_cached_data(self, symbol, period="1d", interval="5m"):
+        # Skip known problematic symbols
+        if symbol in self.failed_symbols:
+            return None
+            
         key = f"{symbol}_{period}_{interval}"
         current_time = time.time()
         
@@ -154,12 +173,14 @@ class DataManager:
         if data is not None:
             self.cache[key] = data
             self.last_update[key] = current_time
+        else:
+            self.failed_symbols.add(symbol)
         
         return data
     
     def fetch_ohlc(self, sym, period="1d", interval="5m"):
         try:
-            df = yf.download(sym, period=period, interval=interval, progress=False, threads=False)
+            df = safe_yf_download(sym, period, interval)
             if df is None or df.empty: 
                 return None
             
@@ -167,7 +188,7 @@ class DataManager:
                 df.columns = [c[0] for c in df.columns]
             
             df = df.dropna(subset=["Close"])
-            if len(df) < 50:
+            if len(df) < 20:
                 return None
                 
             # Calculate basic indicators
@@ -208,6 +229,9 @@ def detect_market_regime():
     nifty_data['SMA20'] = nifty_data['Close'].rolling(20).mean()
     nifty_data['SMA50'] = nifty_data['Close'].rolling(50).mean()
     
+    if len(nifty_data) < 50:
+        return "NEUTRAL"
+        
     current_price = nifty_data['Close'].iloc[-1]
     sma20 = nifty_data['SMA20'].iloc[-1]
     sma50 = nifty_data['SMA50'].iloc[-1]
@@ -244,7 +268,7 @@ class EnhancedRiskManager:
         
         # Check drawdown
         current_equity = trader.equity()
-        drawdown = (self.peak_equity - current_equity) / self.peak_equity
+        drawdown = (self.peak_equity - current_equity) / self.peak_equity if self.peak_equity > 0 else 0
         if drawdown > MAX_DRAWDOWN:
             return False, f"Max drawdown limit reached: {drawdown:.2%}"
         
@@ -308,19 +332,21 @@ def advanced_signal_engine(df, sym):
         bear_score += 1
     
     # MACD momentum (2 points)
-    macd_bullish = current.MACD > current.MACD_Signal and current.MACD > df['MACD'].iloc[-2]
-    macd_bearish = current.MACD < current.MACD_Signal and current.MACD < df['MACD'].iloc[-2]
-    
-    if macd_bullish:
-        bull_score += 2
-    if macd_bearish:
-        bear_score += 2
+    if 'MACD' in current and 'MACD_Signal' in current:
+        macd_bullish = current.MACD > current.MACD_Signal and current.MACD > df['MACD'].iloc[-2]
+        macd_bearish = current.MACD < current.MACD_Signal and current.MACD < df['MACD'].iloc[-2]
+        
+        if macd_bullish:
+            bull_score += 2
+        if macd_bearish:
+            bear_score += 2
     
     # Price vs VWAP (1 point)
-    if current.Close > current.VWAP:
-        bull_score += 1
-    else:
-        bear_score += 1
+    if 'VWAP' in current:
+        if current.Close > current.VWAP:
+            bull_score += 1
+        else:
+            bear_score += 1
     
     # Market regime adjustment
     if market_regime == "BULL_TREND":
@@ -333,7 +359,7 @@ def advanced_signal_engine(df, sym):
     
     if bull_score >= min_score and current.EMA8 > prev.EMA8:
         # ATR-based dynamic stops
-        atr_stop = current.ATR * 1.5
+        atr_stop = current.ATR * 1.5 if 'ATR' in current else current.Close * 0.008
         stop_loss = current.Close - atr_stop
         target = current.Close + (atr_stop * 2)  # 2:1 reward ratio
         
@@ -342,11 +368,11 @@ def advanced_signal_engine(df, sym):
         return {
             "symbol": sym, "action": "BUY", "entry": current.Close, 
             "stop": stop_loss, "target": target, "conf": confidence,
-            "score": bull_score, "atr": current.ATR, "regime": market_regime
+            "score": bull_score, "atr": atr_stop, "regime": market_regime
         }
     
     elif bear_score >= min_score and current.EMA8 < prev.EMA8:
-        atr_stop = current.ATR * 1.5
+        atr_stop = current.ATR * 1.5 if 'ATR' in current else current.Close * 0.008
         stop_loss = current.Close + atr_stop
         target = current.Close - (atr_stop * 2)  # 2:1 reward ratio
         
@@ -355,7 +381,7 @@ def advanced_signal_engine(df, sym):
         return {
             "symbol": sym, "action": "SELL", "entry": current.Close, 
             "stop": stop_loss, "target": target, "conf": confidence,
-            "score": bear_score, "atr": current.ATR, "regime": market_regime
+            "score": bear_score, "atr": atr_stop, "regime": market_regime
         }
     
     return None
@@ -374,9 +400,10 @@ def sector_rotation_analysis():
                 returns.append(ret)
         
         if returns:
+            avg_return = np.mean(returns)
             sector_performance[sector] = {
-                'return': np.mean(returns),
-                'trend': 'BULLISH' if np.mean(returns) > 0.01 else 'BEARISH' if np.mean(returns) < -0.01 else 'NEUTRAL'
+                'return': avg_return,
+                'trend': 'BULLISH' if avg_return > 0.01 else 'BEARISH' if avg_return < -0.01 else 'NEUTRAL'
             }
     
     return dict(sorted(sector_performance.items(), 
@@ -520,12 +547,21 @@ class EnhancedPaperTrader:
         return total
     
     def performance_stats(self):
+        """FIXED: Safe performance stats with default values"""
         if not self.log:
-            return {"total_trades": 0, "win_rate": 0, "total_pnl": 0}
+            return {
+                "total_trades": 0, "win_rate": 0, "total_pnl": 0,
+                "avg_win": 0, "avg_loss": 0, "profit_factor": 0,
+                "largest_win": 0, "largest_loss": 0
+            }
         
         closed_trades = [t for t in self.log if t["event"] == "CLOSE"]
         if not closed_trades:
-            return {"total_trades": 0, "win_rate": 0, "total_pnl": 0}
+            return {
+                "total_trades": 0, "win_rate": 0, "total_pnl": 0,
+                "avg_win": 0, "avg_loss": 0, "profit_factor": 0,
+                "largest_win": 0, "largest_loss": 0
+            }
             
         wins = len([t for t in closed_trades if t["pnl"] > 0])
         total_pnl = sum(t["pnl"] for t in closed_trades)
@@ -536,7 +572,12 @@ class EnhancedPaperTrader:
         
         avg_win = np.mean([t["pnl"] for t in winning_trades]) if winning_trades else 0
         avg_loss = np.mean([t["pnl"] for t in losing_trades]) if losing_trades else 0
-        profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else float('inf')
+        
+        # Safe profit factor calculation
+        if avg_loss != 0:
+            profit_factor = abs(avg_win / avg_loss)
+        else:
+            profit_factor = float('inf') if avg_win > 0 else 0
         
         return {
             "total_trades": len(closed_trades),
@@ -626,13 +667,23 @@ st.markdown("<h1 style='text-align: center; color: #0077cc;'>📊 Intraday Live 
 
 # Market status and enhanced metrics
 col1, col2, col3, col4, col5 = st.columns(5)
+
+# Safe index price fetching
+def get_safe_index_price(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period="1d", interval="1m")
+        if data is not None and not data.empty:
+            return data['Close'].iloc[-1]
+    except:
+        pass
+    return None
+
 with col1:
-    nifty_data = data_manager.get_cached_data("^NSEI", period="1d", interval="1m")
-    nifty_price = nifty_data['Close'].iloc[-1] if nifty_data is not None else None
+    nifty_price = get_safe_index_price("^NSEI")
     st.metric("NIFTY 50", f"₹{nifty_price:,.2f}" if nifty_price else "Loading...")
 with col2:
-    banknifty_data = data_manager.get_cached_data("^NSEBANK", period="1d", interval="1m")
-    banknifty_price = banknifty_data['Close'].iloc[-1] if banknifty_data is not None else None
+    banknifty_price = get_safe_index_price("^NSEBANK")
     st.metric("BANK NIFTY", f"₹{banknifty_price:,.2f}" if banknifty_price else "Loading...")
 with col3:
     market_status = "🟢 LIVE" if market_open() else "🔴 CLOSED"
@@ -674,7 +725,7 @@ with tabs[0]:
         for idx, (sector, data) in enumerate(sector_data.items()):
             with cols[idx]:
                 color = "green" if data['trend'] == 'BULLISH' else "red" if data['trend'] == 'BEARISH' else "gray"
-                st.metric(f"{sector}", f"{data['return']:.2%}", delta=data['trend'], delta_color=color)
+                st.metric(f"{sector}", f"{data['return']:.2%}", delta=data['trend'], delta_color=color")
     
     # Active positions
     st.subheader("Active Positions")
@@ -844,7 +895,7 @@ with tabs[3]:
     with col1:
         st.metric("Daily Trades", f"{trader.risk_manager.daily_trade_count}/{MAX_DAILY_TRADES}")
     with col2:
-        drawdown = (trader.risk_manager.peak_equity - trader.equity()) / trader.risk_manager.peak_equity
+        drawdown = (trader.risk_manager.peak_equity - trader.equity()) / trader.risk_manager.peak_equity if trader.risk_manager.peak_equity > 0 else 0
         st.metric("Current Drawdown", f"{drawdown:.2%}")
     with col3:
         st.metric("Sectors Used", len(trader.risk_manager.sector_exposure))
@@ -875,7 +926,7 @@ with tabs[4]:
     perf = trader.performance_stats()
     sector_perf = trader.sector_performance()
     
-    # Key metrics
+    # Key metrics - FIXED: Safe access to all keys
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Total Trades", perf["total_trades"])
@@ -884,7 +935,15 @@ with tabs[4]:
     with col3:
         st.metric("Total P&L", f"₹{perf['total_pnl']:,.0f}")
     with col4:
-        st.metric("Profit Factor", f"{perf['profit_factor']:.2f}")
+        # Safe profit factor display
+        pf_value = perf['profit_factor']
+        if pf_value == float('inf'):
+            pf_display = "∞"
+        elif pf_value > 100:  # Unrealistically high
+            pf_display = "N/A"
+        else:
+            pf_display = f"{pf_value:.2f}"
+        st.metric("Profit Factor", pf_display)
     
     # Additional metrics
     col1, col2, col3, col4 = st.columns(4)
