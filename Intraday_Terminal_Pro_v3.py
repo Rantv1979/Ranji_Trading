@@ -164,13 +164,46 @@ class DataManager:
         return df
 
     def fetch_ohlc(self, symbol, period="5d", interval="5m"):
+        """Fetch OHLC data robustly and normalize column names.
+        Handles MultiIndex columns, alternate column names (e.g., 'Adj Close') and
+        gracefully returns None if required fields are missing.
+        """
         df = safe_yf_download(symbol, period, interval)
         if df is None or df.empty:
             return None
-        # normalize MultiIndex columns
+        # Normalize MultiIndex produced by some yfinance calls
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(0)
-        df = df.dropna(subset=["Close"]).copy()
+            try:
+                df.columns = df.columns.droplevel(0)
+            except Exception:
+                # fallback: flatten
+                df.columns = [c[1] if len(c) > 1 else c[0] for c in df.columns]
+        # Ensure string column names
+        df.columns = [str(c) for c in df.columns]
+        # Common alternate names -> unify to 'Close','Open','High','Low','Volume'
+        alt_map = {}
+        for c in df.columns:
+            lc = c.lower()
+            if lc in ("adj close","adj_close","adjclose") and 'Close' not in df.columns:
+                alt_map[c] = 'Close'
+            if lc in ("close",) and 'Close' not in df.columns:
+                alt_map[c] = 'Close'
+            if lc in ("open",) and 'Open' not in df.columns:
+                alt_map[c] = 'Open'
+            if lc in ("high",) and 'High' not in df.columns:
+                alt_map[c] = 'High'
+            if lc in ("low",) and 'Low' not in df.columns:
+                alt_map[c] = 'Low'
+            if lc in ("volume",) and 'Volume' not in df.columns:
+                alt_map[c] = 'Volume'
+        if alt_map:
+            df = df.rename(columns=alt_map)
+        # last safe check: require Close/Open/High/Low
+        required = ['Close','Open','High','Low']
+        if not all(col in df.columns for col in required):
+            return None
+        # drop rows missing close
+        df = df.dropna(subset=['Close']).copy()
         if len(df) < 20:
             return None
         # indicators
@@ -183,7 +216,12 @@ class DataManager:
         df['MACD'] = macd_line
         df['MACD_Signal'] = sig_line
         df['MACD_Histogram'] = df['MACD'] - df['MACD_Signal']
-        df['Volume_SMA20'] = df['Volume'].rolling(20).mean()
+        # protect Volume-based indicators if Volume missing or NaN
+        if 'Volume' in df.columns:
+            df['Volume_SMA20'] = df['Volume'].rolling(20).mean()
+        else:
+            df['Volume'] = 0
+            df['Volume_SMA20'] = 0
         df['ATR'] = calculate_atr(df)
         df['VWAP'] = calculate_vwap(df)
         # compute Fib retracement based on last swing (lookback 60 bars)
