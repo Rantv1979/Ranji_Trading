@@ -717,7 +717,7 @@ with tabs[0]:
     cash_used = ((CAPITAL - trader.cash) / CAPITAL) * 100
     st.progress(min(trader.cash / CAPITAL, 1.0), text=f"Cash Used: {cash_used:.1f}%")
     
-    # Sector analysis
+    # Sector analysis - FIXED: Corrected syntax error
     st.subheader("📊 Sector Rotation Analysis")
     sector_data = sector_rotation_analysis()
     if sector_data:
@@ -725,7 +725,7 @@ with tabs[0]:
         for idx, (sector, data) in enumerate(sector_data.items()):
             with cols[idx]:
                 color = "green" if data['trend'] == 'BULLISH' else "red" if data['trend'] == 'BEARISH' else "gray"
-                st.metric(f"{sector}", f"{data['return']:.2%}", delta=data['trend'], delta_color=color")
+                st.metric(f"{sector}", f"{data['return']:.2%}", delta=data['trend'], delta_color=color)
     
     # Active positions
     st.subheader("Active Positions")
@@ -1034,7 +1034,6 @@ with tabs[6]:
             with col2:
                 st.metric("Total Trades", results['total_trades'])
 
-# Trading Log (moved to Analytics tab for space)
 # Reset trading account
 st.sidebar.subheader("Account Management")
 if st.sidebar.button("Reset Paper Account", type="secondary"):
