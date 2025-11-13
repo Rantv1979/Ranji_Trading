@@ -1,15 +1,14 @@
 """
-Intraday Live Trading Terminal — Ultimate Pro Edition v5.0
+Intraday Live Trading Terminal — Ultimate Pro Edition v6.0
 ----------------------------------------------------------
-Features:
-- Enhanced signal accuracy with multiple confirmations
-- Live charts with real-time data
-- Advanced risk management
-- Market regime detection
-- Sector rotation analysis
-- Comprehensive analytics
-- Smart data caching with fallback
-- Professional UI with auto-refresh
+Enhanced Features:
+- Fixed indices loading in Dashboard
+- Improved data fetching reliability
+- Added trending stocks analysis
+- Fibonacci Retracement strategy (Golden Zone)
+- Enhanced dashboard with better visualization
+- Improved signal quality with multiple confirmations
+- Better error handling and fallback mechanisms
 """
 
 import streamlit as st
@@ -19,11 +18,13 @@ import yfinance as yf
 from datetime import datetime, time as dt_time, timedelta
 import pytz, warnings, time
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.express as px
 from streamlit_autorefresh import st_autorefresh
 warnings.filterwarnings("ignore")
 
 # ---------------- Configuration ----------------
-st.set_page_config(page_title="Intraday Terminal Pro v5.0", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Intraday Terminal Pro v6.0", layout="wide", page_icon="📈")
 IND_TZ = pytz.timezone("Asia/Kolkata")
 
 # Trading parameters
@@ -136,6 +137,49 @@ def get_sector(symbol):
             return sector
     return "OTHER"
 
+def calculate_fibonacci_levels(high, low):
+    """Calculate Fibonacci retracement levels"""
+    diff = high - low
+    return {
+        '0.0': high,
+        '0.236': high - 0.236 * diff,
+        '0.382': high - 0.382 * diff,
+        '0.5': high - 0.5 * diff,
+        '0.618': high - 0.618 * diff,
+        '0.786': high - 0.786 * diff,
+        '1.0': low
+    }
+
+def fibonacci_golden_zone_signal(df):
+    """Generate Fibonacci Golden Zone signals (0.5 - 0.618)"""
+    if len(df) < 20:
+        return None
+    
+    recent_high = df['High'].max()
+    recent_low = df['Low'].min()
+    
+    fib_levels = calculate_fibonacci_levels(recent_high, recent_low)
+    current_price = df['Close'].iloc[-1]
+    
+    golden_zone_low = fib_levels['0.618']
+    golden_zone_high = fib_levels['0.5']
+    
+    # Check if price is in golden zone
+    if golden_zone_low <= current_price <= golden_zone_high:
+        # Check for bullish reversal patterns
+        if (df['Close'].iloc[-1] > df['Open'].iloc[-1] and  # Green candle
+            df['Close'].iloc[-2] < df['Open'].iloc[-2] and  # Previous red candle
+            df['RSI14'].iloc[-1] < 60):  # RSI not overbought
+            return "BUY"
+        
+        # Check for bearish reversal patterns
+        elif (df['Close'].iloc[-1] < df['Open'].iloc[-1] and  # Red candle
+              df['Close'].iloc[-2] > df['Open'].iloc[-2] and  # Previous green candle
+              df['RSI14'].iloc[-1] > 40):  # RSI not oversold
+            return "SELL"
+    
+    return None
+
 # ---------------- Enhanced Data Manager ----------------
 class DataManager:
     def __init__(self):
@@ -160,9 +204,15 @@ class DataManager:
     
     def fetch_ohlc(self, symbol, period="1d", interval="5m"):
         """Robust data fetching with multiple fallback strategies"""
-        for retry in range(2):
+        for retry in range(3):  # Increased retries
             try:
-                df = yf.download(symbol, period=period, interval=interval, progress=False, threads=False)
+                # Handle index symbols
+                if symbol.startswith('^'):
+                    ticker_symbol = symbol
+                else:
+                    ticker_symbol = symbol
+                
+                df = yf.download(ticker_symbol, period=period, interval=interval, progress=False, threads=False)
                 if df is None or df.empty:
                     continue
                 
@@ -170,14 +220,20 @@ class DataManager:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.droplevel(0) if df.columns.nlevels > 1 else df.columns
                 
-                df.columns = [str(col) for col in df.columns]
+                df.columns = [str(col).upper() for col in df.columns]
                 
                 # Ensure required columns exist
-                if not all(col in df.columns for col in ['Open', 'High', 'Low', 'Close']):
+                required_cols = ['OPEN', 'HIGH', 'LOW', 'CLOSE']
+                if not all(col in df.columns for col in required_cols):
                     continue
                 
+                df = df.rename(columns={
+                    'OPEN': 'Open', 'HIGH': 'High', 'LOW': 'Low', 
+                    'CLOSE': 'Close', 'VOLUME': 'Volume'
+                })
+                
                 df = df.dropna(subset=['Close']).copy()
-                if len(df) < 20:
+                if len(df) < 10:  # Reduced minimum length requirement
                     continue
                 
                 # Calculate indicators
@@ -204,25 +260,44 @@ class DataManager:
                 return df
                 
             except Exception as e:
-                print(f"Error fetching {symbol}: {e}")
+                print(f"Error fetching {symbol} (attempt {retry+1}): {e}")
+                time.sleep(1)  # Add delay between retries
                 continue
         
         return None
 
+    def get_index_data(self, symbol):
+        """Special method for index data with fallback"""
+        try:
+            # Try multiple period/interval combinations for indices
+            intervals_to_try = [("1d", "5m"), ("1d", "15m"), ("2d", "30m")]
+            
+            for period, interval in intervals_to_try:
+                data = self.get_cached_data(symbol, period, interval)
+                if data is not None and len(data) > 0:
+                    return data
+            
+            # Final fallback - try daily data
+            return self.get_cached_data(symbol, "5d", "1d")
+            
+        except Exception as e:
+            print(f"Error fetching index data for {symbol}: {e}")
+            return None
+
 # ---------------- Market Analysis ----------------
 def detect_market_regime():
     """Detect current market trend"""
-    nifty_data = data_manager.get_cached_data("^NSEI", period="1mo", interval="1d")
+    nifty_data = data_manager.get_index_data("^NSEI")
     
-    if nifty_data is None or len(nifty_data) < 20:
+    if nifty_data is None or len(nifty_data) < 10:
         return "NEUTRAL"
     
     nifty_data['SMA20'] = nifty_data['Close'].rolling(20).mean()
     nifty_data['SMA50'] = nifty_data['Close'].rolling(50).mean()
     
     current_price = nifty_data['Close'].iloc[-1]
-    sma20 = nifty_data['SMA20'].iloc[-1]
-    sma50 = nifty_data['SMA50'].iloc[-1]
+    sma20 = nifty_data['SMA20'].iloc[-1] if not pd.isna(nifty_data['SMA20'].iloc[-1]) else current_price
+    sma50 = nifty_data['SMA50'].iloc[-1] if not pd.isna(nifty_data['SMA50'].iloc[-1]) else current_price
     
     if sma20 > sma50 and current_price > sma20:
         return "BULL_TREND"
@@ -230,6 +305,37 @@ def detect_market_regime():
         return "BEAR_TREND"
     else:
         return "RANGING"
+
+def get_trending_stocks():
+    """Identify trending stocks based on volume and price action"""
+    trending_stocks = []
+    
+    for symbol in NIFTY_50[:20]:  # Check top 20 for performance
+        data = data_manager.get_cached_data(symbol, period="1d", interval="15m")
+        if data is not None and len(data) > 10:
+            # Calculate trend strength
+            price_change = (data['Close'].iloc[-1] - data['Close'].iloc[0]) / data['Close'].iloc[0]
+            volume_spike = False
+            
+            if 'Volume' in data.columns:
+                avg_volume = data['Volume'].mean()
+                current_volume = data['Volume'].iloc[-1]
+                volume_spike = current_volume > avg_volume * 1.5
+            
+            trend_strength = abs(price_change) * 100
+            
+            if trend_strength > 1.0 or volume_spike:  # Minimum 1% move or volume spike
+                trending_stocks.append({
+                    'symbol': symbol,
+                    'price_change': price_change,
+                    'trend_strength': trend_strength,
+                    'volume_spike': volume_spike,
+                    'current_price': data['Close'].iloc[-1]
+                })
+    
+    # Sort by trend strength
+    trending_stocks.sort(key=lambda x: x['trend_strength'], reverse=True)
+    return trending_stocks[:10]  # Return top 10 trending stocks
 
 def sector_rotation_analysis():
     """Analyze sector performance for rotation strategy"""
@@ -255,10 +361,10 @@ def sector_rotation_analysis():
 # ---------------- Enhanced Signal Engine ----------------
 def generate_signal(df, symbol, market_regime="NEUTRAL"):
     """
-    Generate trading signals with multiple confirmations
+    Generate trading signals with multiple confirmations including Fibonacci
     Returns: dict with signal details or None
     """
-    if df is None or len(df) < 30:
+    if df is None or len(df) < 20:
         return None
     
     current = df.iloc[-1]
@@ -269,7 +375,7 @@ def generate_signal(df, symbol, market_regime="NEUTRAL"):
     bear_score = 0
     reasons = []
     
-    # Trend Analysis (40% weight)
+    # Trend Analysis (30% weight)
     if current['EMA8'] > current['EMA21']:
         bull_score += 2
         reasons.append("EMA8 > EMA21")
@@ -284,14 +390,14 @@ def generate_signal(df, symbol, market_regime="NEUTRAL"):
         bear_score += 1
         reasons.append("EMA21 < EMA50")
     
-    # Momentum Indicators (30% weight)
-    if 40 < current['RSI14'] < 70:
+    # Momentum Indicators (25% weight)
+    if 30 < current['RSI14'] < 65:
         bull_score += 1
         reasons.append("RSI Optimal")
     elif current['RSI14'] > 70:
         bear_score += 1
         reasons.append("RSI Overbought")
-    elif current['RSI14'] < 40:
+    elif current['RSI14'] < 35:
         bull_score += 1
         reasons.append("RSI Oversold")
     
@@ -304,9 +410,12 @@ def generate_signal(df, symbol, market_regime="NEUTRAL"):
     
     # Volume & Price Action (20% weight)
     if 'Volume_SMA20' in current and current['Volume'] > current['Volume_SMA20'] * 1.2:
-        bull_score += 1
-        bear_score += 1
-        reasons.append("High Volume")
+        if current['Close'] > current['Open']:  # Green candle with high volume
+            bull_score += 1
+            reasons.append("Bullish Volume")
+        else:  # Red candle with high volume
+            bear_score += 1
+            reasons.append("Bearish Volume")
     
     if current['Close'] > current['VWAP']:
         bull_score += 1
@@ -314,6 +423,15 @@ def generate_signal(df, symbol, market_regime="NEUTRAL"):
     else:
         bear_score += 1
         reasons.append("Below VWAP")
+    
+    # Fibonacci Analysis (15% weight)
+    fib_signal = fibonacci_golden_zone_signal(df)
+    if fib_signal == "BUY":
+        bull_score += 2
+        reasons.append("Fibonacci Golden Zone BUY")
+    elif fib_signal == "SELL":
+        bear_score += 2
+        reasons.append("Fibonacci Golden Zone SELL")
     
     # Market Regime Adjustment (10% weight)
     if market_regime == "BULL_TREND":
@@ -323,10 +441,10 @@ def generate_signal(df, symbol, market_regime="NEUTRAL"):
     
     # Signal Generation
     entry_price = float(current['Close'])
-    atr_value = current['ATR'] if 'ATR' in current else entry_price * 0.01
+    atr_value = current['ATR'] if 'ATR' in current and not pd.isna(current['ATR']) else entry_price * 0.01
     
-    # BUY Signal (Score >= 6 with positive momentum)
-    if bull_score >= 6 and current['EMA8'] > prev['EMA8']:
+    # BUY Signal (Score >= 7 with positive momentum)
+    if bull_score >= 7 and current['EMA8'] > prev['EMA8']:
         stop_loss = entry_price - (atr_value * 1.5)
         target = entry_price + (atr_value * 3)  # 2:1 Reward Ratio
         confidence = min(0.95, 0.5 + (bull_score * 0.05))
@@ -340,11 +458,12 @@ def generate_signal(df, symbol, market_regime="NEUTRAL"):
             "conf": confidence,
             "score": bull_score,
             "reason": " | ".join(reasons),
-            "regime": market_regime
+            "regime": market_regime,
+            "fib_signal": fib_signal
         }
     
-    # SELL Signal (Score >= 6 with negative momentum)
-    elif bear_score >= 6 and current['EMA8'] < prev['EMA8']:
+    # SELL Signal (Score >= 7 with negative momentum)
+    elif bear_score >= 7 and current['EMA8'] < prev['EMA8']:
         stop_loss = entry_price + (atr_value * 1.5)
         target = entry_price - (atr_value * 3)  # 2:1 Reward Ratio
         confidence = min(0.95, 0.5 + (bear_score * 0.05))
@@ -358,7 +477,8 @@ def generate_signal(df, symbol, market_regime="NEUTRAL"):
             "conf": confidence,
             "score": bear_score,
             "reason": " | ".join(reasons),
-            "regime": market_regime
+            "regime": market_regime,
+            "fib_signal": fib_signal
         }
     
     return None
@@ -567,7 +687,7 @@ class PaperTrader:
         df['time'] = df['time'].dt.strftime("%Y-%m-%d %H:%M:%S")
         return df
     
-    def calculate_equity(self):
+    def equity(self):
         """Calculate total account equity"""
         total_equity = self.cash
         
@@ -628,24 +748,30 @@ if "trader" not in st.session_state:
 trader = st.session_state.trader
 
 # ---------------- Streamlit UI ----------------
-st.markdown("<h1 style='text-align: center; color: #0077cc;'>📈 Intraday Trading Terminal Pro v5.0</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center; color: #0077cc;'>📈 Intraday Trading Terminal Pro v6.0</h1>", unsafe_allow_html=True)
 
-# Market Overview
+# Market Overview - FIXED INDICES LOADING
 col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     try:
-        nifty_data = data_manager.get_cached_data("^NSEI", period="1d", interval="5m")
-        nifty_price = nifty_data['Close'].iloc[-1] if nifty_data is not None else None
-        st.metric("NIFTY 50", f"₹{nifty_price:,.2f}" if nifty_price else "Loading...")
+        nifty_data = data_manager.get_index_data("^NSEI")
+        nifty_price = nifty_data['Close'].iloc[-1] if nifty_data is not None and len(nifty_data) > 0 else None
+        nifty_change = ((nifty_data['Close'].iloc[-1] - nifty_data['Close'].iloc[0]) / nifty_data['Close'].iloc[0] * 100) if nifty_data is not None and len(nifty_data) > 1 else 0
+        st.metric("NIFTY 50", 
+                 f"₹{nifty_price:,.2f}" if nifty_price else "Loading...",
+                 delta=f"{nifty_change:+.2f}%" if nifty_price else None)
     except:
         st.metric("NIFTY 50", "Loading...")
 
 with col2:
     try:
-        bank_nifty_data = data_manager.get_cached_data("^NSEBANK", period="1d", interval="5m")
-        bank_nifty_price = bank_nifty_data['Close'].iloc[-1] if bank_nifty_data is not None else None
-        st.metric("BANK NIFTY", f"₹{bank_nifty_price:,.2f}" if bank_nifty_price else "Loading...")
+        bank_nifty_data = data_manager.get_index_data("^NSEBANK")
+        bank_nifty_price = bank_nifty_data['Close'].iloc[-1] if bank_nifty_data is not None and len(bank_nifty_data) > 0 else None
+        bank_nifty_change = ((bank_nifty_data['Close'].iloc[-1] - bank_nifty_data['Close'].iloc[0]) / bank_nifty_data['Close'].iloc[0] * 100) if bank_nifty_data is not None and len(bank_nifty_data) > 1 else 0
+        st.metric("BANK NIFTY", 
+                 f"₹{bank_nifty_price:,.2f}" if bank_nifty_price else "Loading...",
+                 delta=f"{bank_nifty_change:+.2f}%" if bank_nifty_price else None)
     except:
         st.metric("BANK NIFTY", "Loading...")
 
@@ -665,7 +791,7 @@ with col5:
 # Main Tabs
 tabs = st.tabs(["📊 Dashboard", "🎯 Signals", "📈 Live Charts", "💼 Trading", "📋 Analytics"])
 
-# Dashboard Tab
+# Dashboard Tab - ENHANCED
 with tabs[0]:
     st.subheader("Trading Overview")
     
@@ -673,11 +799,28 @@ with tabs[0]:
     with col1:
         st.metric("Cash Balance", f"₹{trader.cash:,.0f}")
     with col2:
-        st.metric("Total Equity", f"₹{trader.calculate_equity():,.0f}")
+        st.metric("Total Equity", f"₹{trader.equity():,.0f}")
     with col3:
         st.metric("Open Positions", len(trader.positions))
     with col4:
         st.metric("Daily Trades", f"{trader.risk_manager.daily_trade_count}/{MAX_DAILY_TRADES}")
+    
+    # Trending Stocks
+    st.subheader("🔥 Trending Stocks")
+    trending_stocks = get_trending_stocks()
+    if trending_stocks:
+        trending_cols = st.columns(5)
+        for idx, stock in enumerate(trending_stocks[:5]):
+            with trending_cols[idx % 5]:
+                change_color = "green" if stock['price_change'] > 0 else "red"
+                st.metric(
+                    stock['symbol'].replace('.NS', ''),
+                    f"₹{stock['current_price']:.1f}",
+                    delta=f"{stock['price_change']:+.2%}",
+                    delta_color=change_color
+                )
+    else:
+        st.info("No trending stocks detected")
     
     # Sector Analysis
     st.subheader("Sector Rotation")
@@ -697,16 +840,18 @@ with tabs[0]:
     else:
         st.info("No active positions")
 
-# Signals Tab
+# Signals Tab - ENHANCED
 with tabs[1]:
     st.subheader("Live Signal Scanner")
     st_autorefresh(interval=SIGNAL_REFRESH_MS, key="signal_refresh")
     
-    col1, col2 = st.columns([2, 1])
+    col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
         selected_universe = st.selectbox("Select Universe", ["Nifty 50", "Nifty 100"], index=0)
     with col2:
-        min_confidence = st.slider("Minimum Confidence", 0.5, 0.9, AUTO_EXEC_CONF, 0.05)
+        min_confidence = st.slider("Min Confidence", 0.5, 0.9, AUTO_EXEC_CONF, 0.05)
+    with col3:
+        enable_fib = st.checkbox("Fibonacci Strategy", True)
     
     symbols_to_scan = NIFTY_50 if selected_universe == "Nifty 50" else NIFTY_100
     
@@ -721,7 +866,9 @@ with tabs[1]:
             signal = generate_signal(data, symbol, market_regime)
             
             if signal and signal["conf"] >= min_confidence:
-                signals_found.append(signal)
+                # Filter by Fibonacci strategy if enabled
+                if not enable_fib or signal.get("fib_signal"):
+                    signals_found.append(signal)
                 
                 # Auto-execute high confidence signals
                 if signal["conf"] >= AUTO_EXEC_CONF:
@@ -747,14 +894,19 @@ with tabs[1]:
             display_df['stop'] = display_df['stop'].apply(lambda x: f"₹{x:.2f}")
             display_df['target'] = display_df['target'].apply(lambda x: f"₹{x:.2f}")
             
-            st.dataframe(display_df, use_container_width=True)
+            # Color code actions
+            def color_action(action):
+                return 'color: green' if action == 'BUY' else 'color: red'
+            
+            styled_df = display_df.style.applymap(color_action, subset=['action'])
+            st.dataframe(styled_df, use_container_width=True)
         else:
             st.info("No trading signals found in this scan.")
     
     else:
         st.warning("Click 'Scan for Signals' or wait for market hours for auto-scanning")
 
-# Live Charts Tab
+# Live Charts Tab - ENHANCED WITH FIBONACCI
 with tabs[2]:
     st.subheader("Live Technical Analysis")
     st_autorefresh(interval=CHART_REFRESH_MS, key="chart_refresh")
@@ -765,6 +917,7 @@ with tabs[2]:
         show_rsi = st.checkbox("Show RSI", True)
         show_macd = st.checkbox("Show MACD", True)
         show_vwap = st.checkbox("Show VWAP", True)
+        show_fib = st.checkbox("Show Fibonacci", True)
         show_volume = st.checkbox("Show Volume", False)
     
     with col2:
@@ -773,17 +926,33 @@ with tabs[2]:
         used_interval = ""
         for period, interval in CHART_INTERVALS:
             chart_data = data_manager.get_cached_data(selected_symbol, period, interval)
-            if chart_data is not None:
+            if chart_data is not None and len(chart_data) > 10:
                 used_interval = f"{period} - {interval}"
                 break
         
-        if chart_data is not None:
+        if chart_data is not None and len(chart_data) > 10:
             st.write(f"Data: {used_interval} | Last Updated: {now_indian().strftime('%H:%M:%S')}")
             
-            # Create candlestick chart
-            fig = go.Figure()
+            # Create subplots
+            if show_rsi or show_macd:
+                rows = 1
+                if show_rsi and show_macd:
+                    rows = 3
+                elif show_rsi or show_macd:
+                    rows = 2
+                
+                fig = make_subplots(
+                    rows=rows, cols=1,
+                    shared_xaxes=True,
+                    vertical_spacing=0.05,
+                    subplot_titles=('Price', 'RSI', 'MACD')[:rows],
+                    row_heights=[0.6, 0.2, 0.2][:rows]
+                )
+            else:
+                fig = go.Figure()
             
             # Candlesticks
+            row_idx = 1
             fig.add_trace(go.Candlestick(
                 x=chart_data.index,
                 open=chart_data['Open'],
@@ -791,48 +960,83 @@ with tabs[2]:
                 low=chart_data['Low'],
                 close=chart_data['Close'],
                 name="Price"
-            ))
+            ), row=row_idx, col=1)
             
             # EMAs
             fig.add_trace(go.Scatter(
                 x=chart_data.index, y=chart_data['EMA8'],
                 name="EMA 8", line=dict(color='orange', width=1)
-            ))
+            ), row=row_idx, col=1)
+            
             fig.add_trace(go.Scatter(
                 x=chart_data.index, y=chart_data['EMA21'],
                 name="EMA 21", line=dict(color='red', width=1)
-            ))
+            ), row=row_idx, col=1)
             
             # VWAP
             if show_vwap and 'VWAP' in chart_data.columns:
                 fig.add_trace(go.Scatter(
                     x=chart_data.index, y=chart_data['VWAP'],
                     name="VWAP", line=dict(color='purple', width=1, dash='dash')
-                ))
+                ), row=row_idx, col=1)
+            
+            # Fibonacci Retracement
+            if show_fib and len(chart_data) >= 20:
+                recent_high = chart_data['High'].max()
+                recent_low = chart_data['Low'].min()
+                fib_levels = calculate_fibonacci_levels(recent_high, recent_low)
+                
+                # Add Fibonacci levels
+                for level, price in fib_levels.items():
+                    color = 'gold' if level in ['0.5', '0.618'] else 'gray'
+                    width = 2 if level in ['0.5', '0.618'] else 1
+                    dash = 'dash' if level in ['0.5', '0.618'] else 'dot'
+                    
+                    fig.add_hline(
+                        y=price,
+                        line_dash=dash,
+                        line_color=color,
+                        line_width=width,
+                        annotation_text=f"Fib {level}",
+                        row=row_idx, col=1
+                    )
+            
+            # RSI
+            if show_rsi:
+                row_idx += 1
+                fig.add_trace(go.Scatter(
+                    x=chart_data.index, y=chart_data['RSI14'],
+                    name="RSI", line=dict(color='blue', width=1)
+                ), row=row_idx, col=1)
+                
+                # RSI levels
+                fig.add_hline(y=70, line_dash="dash", line_color="red", row=row_idx, col=1)
+                fig.add_hline(y=30, line_dash="dash", line_color="green", row=row_idx, col=1)
+                fig.add_hline(y=50, line_dash="dot", line_color="gray", row=row_idx, col=1)
+            
+            # MACD
+            if show_macd:
+                row_idx += 1
+                fig.add_trace(go.Scatter(
+                    x=chart_data.index, y=chart_data['MACD'],
+                    name="MACD", line=dict(color='blue', width=1)
+                ), row=row_idx, col=1)
+                
+                fig.add_trace(go.Scatter(
+                    x=chart_data.index, y=chart_data['MACD_Signal'],
+                    name="Signal", line=dict(color='red', width=1)
+                ), row=row_idx, col=1)
             
             fig.update_layout(
                 title=f"{selected_symbol} - Live Chart",
                 xaxis_rangeslider_visible=False,
-                height=500,
+                height=600,
                 showlegend=True
             )
             
             st.plotly_chart(fig, use_container_width=True)
             
-            # Indicators
-            if show_rsi:
-                st.subheader("RSI (14)")
-                st.line_chart(chart_data["RSI14"], height=120)
-            
-            if show_macd:
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.subheader("MACD")
-                    st.line_chart(chart_data["MACD"], height=120)
-                with col2:
-                    st.subheader("MACD Histogram")
-                    st.line_chart(chart_data["MACD_Histogram"], height=120)
-            
+            # Volume
             if show_volume and 'Volume' in chart_data.columns:
                 st.subheader("Volume")
                 st.bar_chart(chart_data["Volume"], height=120)
@@ -840,13 +1044,13 @@ with tabs[2]:
         else:
             st.error("Unable to fetch data for the selected symbol")
 
-# Trading Tab
+# Trading Tab (unchanged, but using fixed equity method)
 with tabs[3]:
     st.subheader("Paper Trading Account")
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Account Value", f"₹{trader.calculate_equity():,.0f}")
+        st.metric("Account Value", f"₹{trader.equity():,.0f}")
     with col2:
         st.metric("Available Cash", f"₹{trader.cash:,.0f}")
     with col3:
@@ -871,12 +1075,11 @@ with tabs[3]:
                 data = data_manager.get_cached_data(position_to_close)
                 if data is not None:
                     current_price = float(data['Close'].iloc[-1])
-                    # This would trigger the close logic in update_positions
                     position = trader.positions[position_to_close]
                     if position["action"] == "BUY":
-                        position["stop"] = current_price  # Force close
+                        position["stop"] = current_price
                     else:
-                        position["stop"] = current_price  # Force close
+                        position["stop"] = current_price
                     trader.update_positions()
                     st.success(f"Closed {position_to_close} at ₹{current_price:.2f}")
                     st.rerun()
@@ -900,7 +1103,7 @@ with tabs[3]:
     else:
         st.info("No trade history available")
 
-# Analytics Tab
+# Analytics Tab (unchanged)
 with tabs[4]:
     st.subheader("Performance Analytics")
     
@@ -929,7 +1132,9 @@ with tabs[4]:
             avg_trade = performance['total_pnl'] / performance['total_trades']
             st.metric("Avg Trade", f"₹{avg_trade:,.0f}")
         with col4:
-            st.metric("Expectancy", f"₹{(performance['win_rate'] * performance['avg_win'] + (1-performance['win_rate']) * performance['avg_loss']):,.0f}")
+            expectancy = (performance['win_rate'] * performance['avg_win'] + 
+                         (1-performance['win_rate']) * performance['avg_loss'])
+            st.metric("Expectancy", f"₹{expectancy:,.0f}")
     
     # Equity Curve
     if len(trader.trade_log) > 1:
@@ -960,7 +1165,7 @@ st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: #666;'>"
     "⚠️ Paper Trading Simulation | Real-time data from Yahoo Finance | "
-    "Market Hours: 9:15 AM - 3:30 PM IST | v5.0"
+    "Market Hours: 9:15 AM - 3:30 PM IST | v6.0 with Fibonacci & Trending Stocks"
     "</div>",
     unsafe_allow_html=True
 )
