@@ -8,4 +8,5 @@ scikit-learn>=1.5.1
 textblob==0.18.0
 joblib==1.4.2
 requests==2.32.3
+pytz==2023.3
 streamlit-autorefresh
